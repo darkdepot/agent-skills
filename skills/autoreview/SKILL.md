@@ -210,6 +210,10 @@ datasets are partitioned automatically. Intact instructions and required mixed
 source context must still fit the per-pass prompt budget. A failed pass does not
 produce a partial clean verdict.
 
+Each pass is an independent assignment, not a continuing conversation. Its
+private completion field must confirm a finished assessment; deferring to
+another pass leaves the overall review incomplete.
+
 Do not edit inputs during a review: the helper verifies captured sources before
 sending and publishing results. Long reviews are normal; advancing heartbeats
 mean progress. Use `--stream-engine-output` for visibility, not extra reviewer
@@ -226,7 +230,7 @@ platform, even when the filesystem would permit distinct files.
 | ---- | ------------------------------------------------------------------------------- |
 | `0`  | `scoped-clean`, or a correct verdict with only filtered lower-priority findings |
 | `1`  | Accepted findings, an incorrect provider verdict, or a failed review attempt    |
-| `2`  | Incomplete scope/attribution, or a missing required finding                     |
+| `2`  | Unfinished assessment, incomplete scope/attribution, or a missing required finding |
 
 Treat `scoped-clean` as clean only for the selected target and requested priority.
 `filtered` is not clean; resolve `incomplete` before claiming completion.
@@ -264,6 +268,11 @@ helper's deadline, not a reviewer that happens to exit 124. Completed envelopes
 have `report_produced: true`; this means a validated final report exists, not
 that its verdict is clean. `--expect-findings` changes exit codes as before;
 inspect `status` independently of `exit_code`.
+
+An unfinished assessment retains its validated provider observations with
+`incomplete`, exit 2, and `report_produced: true`, even when findings exist.
+The private completion field is not copied into public reports. Missing or
+invalid completion is an invalid report, not an unfinished assessment.
 
 The sidecar contains no provider logs, prompts, findings, or model identifiers.
 Existing bounded, display-safe diagnostics remain on stderr; command-auth
