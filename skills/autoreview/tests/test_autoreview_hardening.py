@@ -3568,7 +3568,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             repo = init_repo(Path(tempdir)).resolve()
             prompt = repo / "review.md"
-            prompt.write_text("review context\n", encoding="utf-8")
+            prompt.write_bytes(b"review context\n")
             args = argparse.Namespace(prompt=[], prompt_file=[str(prompt)], dataset=[])
             evidence = self.helper["capture_evidence_inputs"](args, repo)
             self.assertEqual(evidence.prompt, "# Prompt file: review.md\nreview context\n")
