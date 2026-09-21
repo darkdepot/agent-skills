@@ -68,6 +68,18 @@ validated scalar value reaches diff/status; other global and system Git
 configuration stays disabled. Repository-owned or relative global-config
 overrides are not imported, and reviewed source bytes are not rewritten.
 
+Local and automatic selection refuse repositories with an effective nonempty
+Git `filter.<name>.clean` or `filter.<name>.process` command, including unused
+drivers. Git's built-in line-ending normalization still applies. Review committed
+content with explicit branch or commit mode when external conversion is configured;
+autoreview never executes those converters or substitutes unfiltered file bytes.
+PR-base discovery uses trusted external Git and a scoped GitHub CLI environment,
+preserving external authentication/configuration and proxy settings while excluding
+inherited Git routing, `GH_REPO` redirection, and checkout-owned executables.
+A differently named `AUTOREVIEW_GIT` override that cannot also be selected as `git`
+by the child requires an explicit `--base`; rejected GitHub configuration paths
+also require one.
+
 ## Context and severity
 
 Use `--prompt` for task-specific guidance, or `--prompt-file` and `--dataset` for
@@ -166,7 +178,8 @@ resolved executable (or the unresolved selection); it never means `scoped-clean`
 Set `AUTOREVIEW_GIT` to a trusted external Git executable to override every
 helper-owned Git invocation. On macOS with a broken selected Xcode, use
 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` for the invocation.
-Only `DEVELOPER_DIR` is additionally retained in Git's sanitized environment;
+Only an absolute, external `DEVELOPER_DIR` is additionally retained in Git's
+sanitized environment;
 neither override is forwarded to the isolated reviewer environment.
 
 Every reviewer pass must inspect its bundle for real credentials and report

@@ -53,7 +53,7 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/autoreview-codex" --ignore-scripts --no-audit --no-fund @openai/codex@0.154.0
           echo "$RUNNER_TEMP/autoreview-codex/node_modules/.bin" >> "$GITHUB_PATH"
-      - name: Exercise native sandbox without provider access
+      - name: Exercise native sandbox and Git boundaries without provider access
         run: |
           codex --version
-          python -m unittest skills.autoreview.tests.test_codex_sandbox
+          python -m unittest skills.autoreview.tests.test_codex_sandbox skills.autoreview.tests.test_git_boundary

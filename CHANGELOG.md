@@ -15,6 +15,7 @@
 - Preserve complete Autoreview source and evidence without file or count caps, partitioning oversized inputs across review passes without truncation or partial-clean success.
 - Preserve base/index/working-tree source identity, literal paths, empty-source anchors, raw Git parents, and directory transitions; honor explicit local bases and normalize Git diff presentation.
 - Honor trusted global Git `core.autocrlf` during Autoreview selection while preserving local overrides, attributes, source bytes, and protected Git execution.
+- Prevent checkout-controlled Git execution during Autoreview PR-base discovery, refuse executable clean/process filters during local collection, and isolate disposable fixture repositories from inherited Git routing and configuration. Committed branch/commit reviews remain available.
 - Respect an explicit Git `HOME` without evaluating an unavailable Windows platform-home fallback.
 - Remove the external TruffleHog requirement from Autoreview; keep isolated reviewer credential checks and leave any pre-send scanning to the caller. Thanks @Patrick-Erichsen.
 - Keep reviewer input, authentication, temporary files, and tools isolated; protect captured evidence against mutation and topology changes, and confine macOS reviewer scratch access.

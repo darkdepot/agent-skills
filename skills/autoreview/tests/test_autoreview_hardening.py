@@ -30,6 +30,7 @@ except ModuleNotFoundError:
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "autoreview"
+fixture_git = runpy.run_path(str(SCRIPT.with_name("test-review-harness.py")))["fixture_git"]
 FIXTURES = Path(__file__).with_name("fixtures")
 PRIVATE_KEY_BEGIN_TEXT = "BEGIN " + "PRIVATE KEY"
 RSA_PRIVATE_KEY_BEGIN_TEXT = "BEGIN RSA " + "PRIVATE KEY"
@@ -208,19 +209,8 @@ def deadline_after_reviewer_ready(helper, ready: Path):
 
 
 def git(repo: Path, *args: str) -> str:
-    env = os.environ.copy()
-    env.update(
-        {
-            "GIT_AUTHOR_NAME": "Autoreview Test",
-            "GIT_AUTHOR_EMAIL": "autoreview@example.invalid",
-            "GIT_COMMITTER_NAME": "Autoreview Test",
-            "GIT_COMMITTER_EMAIL": "autoreview@example.invalid",
-        }
-    )
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        env=env,
+    result = fixture_git(
+        repo, *args,
         check=True,
         text=True,
         stdout=subprocess.PIPE,
@@ -647,8 +637,8 @@ class AutoreviewMixedTargetTests(unittest.TestCase):
                     if mutation == "index conflict":
                         git(repo, "update-index", "--force-remove", "--", "src/migrate-0.py")
                         # Text-mode stdin on Windows adds a CR to Git's pathname.
-                        subprocess.run(["git", "update-index", "--index-info"], cwd=repo, check=True,
-                                       input=f"100644 {oid} 2\tsrc/migrate-0.py\n".encode(), capture_output=True)
+                        fixture_git(repo, "update-index", "--index-info", check=True,
+                                    input=f"100644 {oid} 2\tsrc/migrate-0.py\n".encode(), capture_output=True)
                     else:
                         mode = "160000" if mutation == "index gitlink" else "120000"
                         git(repo, "update-index", "--cacheinfo", f"{mode},{oid},src/migrate-0.py")
@@ -2159,9 +2149,10 @@ class AutoreviewHardeningTests(unittest.TestCase):
                 git(repo, "add", "unrelated.txt")
                 git(repo, "commit", "-qm", "unrelated maintenance")
             expected_parent = git(repo, "rev-parse", "HEAD^").strip()
-            expected_patch = subprocess.check_output(
-                ["git", "diff", *self.helper["SAFE_DIFF_FLAGS"], "HEAD^", "HEAD"], cwd=repo,
-            ).decode("utf-8")
+            expected_patch = fixture_git(
+                repo, "diff", *self.helper["SAFE_DIFF_FLAGS"], "HEAD^", "HEAD",
+                check=True, capture_output=True,
+            ).stdout.decode("utf-8")
             for state, depth in (("missing", 1), ("available", 2), ("retained", None)):
                 with self.subTest(state=state):
                     checkout = root / state
@@ -6740,14 +6731,10 @@ class AuthenticatedProxyTests(unittest.TestCase):
             root = Path(tmp).resolve()
             repo = root / "repo"
             repo.mkdir()
-            def git(*args):
-                subprocess.run(["git", "-C", str(repo), "-c", "user.name=Proxy Test",
-                                "-c", "user.email=proxy@example.invalid", "-c", "commit.gpgsign=false",
-                                *args], check=True, capture_output=True)
-            git("init", "-q")
+            git(repo, "init", "-q")
             (repo / "source.txt").write_text("before\n")
-            git("add", ".")
-            git("commit", "-qm", "fixture")
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "fixture")
             (repo / "source.txt").write_text("after\n")
             fake = root / "codex-fixture"
             fake.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
