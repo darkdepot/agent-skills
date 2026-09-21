@@ -68,11 +68,14 @@ validated scalar value reaches diff/status; other global and system Git
 configuration stays disabled. Repository-owned or relative global-config
 overrides are not imported, and reviewed source bytes are not rewritten.
 
-Local and automatic selection refuse repositories with an effective nonempty
-Git `filter.<name>.clean` or `filter.<name>.process` command, including unused
-drivers. Git's built-in line-ending normalization still applies. Review committed
-content with explicit branch or commit mode when external conversion is configured;
-autoreview never executes those converters or substitutes unfiltered file bytes.
+Local collection disables effective Git clean/process commands and requires
+conversion to succeed. Unused drivers, unchanged filtered neighbors, staged-only
+changes, and deletions can still be reviewed without executing converters.
+If Git needs executable conversion to assemble the diff, collection fails before
+any reviewer starts. This can include an unchanged filtered file whose stat cache
+needs refreshing. Use explicit branch or commit mode for committed content in
+that case. Built-in line-ending normalization remains enabled; raw bytes never
+stand in for a required executable conversion.
 PR-base discovery uses trusted external Git and a scoped GitHub CLI environment,
 preserving external authentication/configuration and proxy settings while excluding
 inherited Git routing, `GH_REPO` redirection, and checkout-owned executables.

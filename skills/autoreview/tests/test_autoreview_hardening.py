@@ -1806,6 +1806,164 @@ class AutoreviewHardeningTests(unittest.TestCase):
                         if required and expected_status == "incomplete":
                             self.assertEqual(result["missing_required_findings"], required)
 
+    def test_local_filter_collection_is_all_or_nothing_before_review(self) -> None:
+        import shlex
+
+        cases = (
+            ("required-conversion", "probe", {"aaa-ordinary.txt", "data.txt"}),
+            ("unused-driver", "unused", {"aaa-ordinary.txt", "data.txt"}),
+            ("stat-clean-neighbor", "probe", {"aaa-ordinary.txt"}),
+        )
+        provider_report = {
+            "findings": [],
+            "overall_correctness": "patch is correct",
+            "overall_explanation": "Synthetic complete-scope review.",
+            "overall_confidence": 0.99,
+        }
+        for scenario, driver, expected_paths in cases:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(
+                prefix="autoreview-filter-main.",
+            ) as tempdir:
+                root = Path(tempdir).resolve()
+                home = root / "operator"
+                home.mkdir()
+                # Keep native setup and main's actual Git preflight independent of
+                # caller routing, configuration, reviewer defaults, and credentials.
+                env = {key: os.environ[key] for key in (
+                    "PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "COMSPEC", "WINDIR",
+                    "TEMP", "TMP", "TMPDIR", "DEVELOPER_DIR",
+                ) if key in os.environ}
+                env.update({
+                    "HOME": str(home), "USERPROFILE": str(home),
+                    "GIT_CONFIG_GLOBAL": os.devnull,
+                    "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0",
+                    "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+                })
+                with mock.patch.dict(os.environ, env, clear=True):
+                    repo = init_repo(root)
+                    git(repo, "config", "core.autocrlf", "false")
+                    git(repo, "config", "commit.gpgsign", "false")
+                    ordinary = repo / "aaa-ordinary.txt"
+                    data = repo / "data.txt"
+                    markers = (root / "clean-dispatched", root / "process-dispatched")
+                    programs = (repo / "cleaner.py", repo / "processor.py")
+                    for marker, program, ending in zip(markers, programs, (
+                        "sys.stdout.buffer.write(sys.stdin.buffer.read())\n",
+                        "raise SystemExit(23)\n",
+                    )):
+                        program.write_bytes((
+                            "from pathlib import Path\nimport sys\n"
+                            f"Path({str(marker)!r}).write_bytes(b'synthetic dispatch\\n')\n"
+                            + ending
+                        ).encode("utf-8"))
+                    (repo / ".gitattributes").write_bytes(b"data.txt filter=probe\n")
+                    ordinary.write_bytes(b"ordinary original\n")
+                    data.write_bytes(b"filtered original\n")
+                    git(repo, "add", ".")
+                    git(repo, "commit", "-qm", "synthetic dormant filter fixture")
+
+                    # Establish non-racy clean data before enabling any converter.
+                    # Never repair or refresh that entry after converters are armed.
+                    info = data.stat()
+                    os.utime(data, ns=(info.st_atime_ns, info.st_mtime_ns - 2_000_000_000))
+                    git(repo, "update-index", "--refresh")
+                    ordinary.write_bytes(b"ordinary changed before filtered path\n")
+                    if scenario != "stat-clean-neighbor":
+                        data.write_bytes(b"filtered content changed and different in size\n")
+                    # Freeze the complete expected patch while no driver can run.
+                    expected_patch = git(
+                        repo, "--no-optional-locks", "diff", "--no-ext-diff",
+                        "--no-textconv", "--no-renames", "--no-color", "--patch",
+                    )
+                    self.assertIn("+ordinary changed before filtered path", expected_patch)
+                    if scenario != "stat-clean-neighbor":
+                        self.assertIn("+filtered content changed and different in size", expected_patch)
+                    for field, program in zip(("clean", "process"), programs):
+                        command = shlex.join((Path(sys.executable).as_posix(), program.as_posix()))
+                        git(repo, "config", f"filter.{driver}.{field}", command)
+                    git(repo, "config", f"filter.{driver}.required", "true")
+
+                    def observe():
+                        # Collection may refresh index stat caches, but must retain
+                        # every staged entry and every working/configuration byte.
+                        files = {
+                            str(path.relative_to(repo)): path.read_bytes()
+                            for path in repo.rglob("*")
+                            if path.is_file() and path != repo / ".git" / "index"
+                        }
+                        return files, git(repo, "ls-files", "--stage", "-z")
+
+                    before = observe()
+                    output_dir = root / "outputs"
+                    output_dir.mkdir()
+                    human = output_dir / "report.txt"
+                    report = output_dir / "report.json"
+                    sidecar = output_dir / "status.json"
+                    sidecar.write_bytes(b'{"status":"scoped-clean","stale":true}\n')
+                    argv = [
+                        str(SCRIPT), "--engine", "codex", "--mode", "local",
+                        "--max-priority", "P2", "--output", str(human),
+                        "--json-output", str(report), "--status-output", str(sidecar),
+                    ]
+
+                    def reply(_args, selected_repo, _prompt):
+                        if scenario == "required-conversion":
+                            raise AssertionError("partial conversion-dependent scope reached reviewer")
+                        self.assertEqual(selected_repo, repo)
+                        return json.dumps(provider_report)
+
+                    engine = mock.Mock(side_effect=reply)
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    main = self.helper["main_impl"]
+                    with mock.patch.dict(main.__globals__, {
+                        "repo_root": lambda: repo,
+                        "resolve_engine_binary": lambda *_args: (True, None),
+                        "run_engine": engine,
+                    }), mock.patch.object(sys, "argv", argv), \
+                            contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        try:
+                            if scenario == "required-conversion":
+                                with self.assertRaisesRegex(SystemExit, r"(?i)filter"):
+                                    main()
+                            else:
+                                self.assertEqual(main(), 0)
+                        finally:
+                            self.assertFalse(markers[0].exists(), "clean converter executed")
+                            self.assertFalse(markers[1].exists(), "process converter executed")
+                            self.assertEqual(observe(), before, "collection mutated fixture inputs")
+
+                    if scenario == "required-conversion":
+                        engine.assert_not_called()
+                        self.assertEqual(list(output_dir.iterdir()), [],
+                                         "refusal must not leave reports, status, or partial outputs")
+                        self.assertNotIn("scoped-clean:", stdout.getvalue())
+                        continue
+
+                    engine.assert_called_once()
+                    prompt = engine.call_args.args[2]
+                    self.assertIn(expected_patch.rstrip(), prompt)
+                    paths = set(re.findall(r"^diff --git a/(\S+) b/\1$", prompt, re.MULTILINE))
+                    self.assertEqual(paths, expected_paths)
+                    for path in expected_paths:
+                        self.assertEqual(prompt.count(f"diff --git a/{path} b/{path}\n"), 1)
+                    result = json.loads(report.read_text(encoding="utf-8"))
+                    self.assertEqual(result["findings"], [])
+                    self.assertEqual(result["review_status"], "scoped-clean")
+                    for key in ("overall_correctness", "overall_explanation", "overall_confidence"):
+                        self.assertEqual(result[key], provider_report[key])
+                    self.assertEqual(json.loads(sidecar.read_text(encoding="utf-8")), {
+                        "schema_version": 1, "status": "scoped-clean", "exit_code": 0,
+                        "engine": "codex", "report_produced": True, "reason": None,
+                        "reviewer_exit_code": None, "timed_out": False,
+                    })
+                    rendered = human.read_text(encoding="utf-8")
+                    self.assertIn("scoped-clean:", rendered)
+                    self.assertIn(provider_report["overall_explanation"], rendered)
+                    self.assertIn(rendered, stdout.getvalue())
+                    self.assertEqual({path.name for path in output_dir.iterdir()},
+                                     {"report.txt", "report.json", "status.json"})
+
     def test_status_unavailable_and_local_refusals_remain_distinct(self) -> None:
         clean = json.dumps({"findings": [], "overall_correctness": "patch is correct",
                             "overall_explanation": "Synthetic review.", "overall_confidence": 0.9})

@@ -1959,13 +1959,15 @@ def git_bytes(
     check: bool = True,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    if args and args[0] in {"diff", "status"}:
-        reject_executable_git_filters(repo, env=env)
     line_ending_args = (
         git_line_ending_args(repo)
         if env is None and args and args[0] in {"diff", "status"}
         else []
     )
+    child_env = env if env is not None else safe_git_env(repo)
+    filters_disabled = False
+    if args and args[0] in {"diff", "status"}:
+        child_env, filters_disabled = disable_git_filters(repo, child_env)
     result = subprocess.run(
         [
             resolve_git(repo),
@@ -1977,7 +1979,7 @@ def git_bytes(
         cwd=repo,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=env if env is not None else safe_git_env(repo),
+        env=child_env,
     )
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).decode(
@@ -1987,29 +1989,57 @@ def git_bytes(
         raise SystemExit(
             f"Git failed while reading review data ({result.returncode}): "
             f"{display_escape(detail, 1000, multiline=True)}"
+            + ("\nExecutable Git filters are disabled; use branch or commit mode if conversion is required."
+               if filters_disabled else "")
         )
     return result
 
 
-def reject_executable_git_filters(repo: Path, *, env: dict[str, str] | None = None) -> None:
+def disable_git_filters(repo: Path, env: dict[str, str]) -> tuple[dict[str, str], bool]:
     result = git_result(
-        repo, "config", "--includes", "--null", "--get-regexp", r"^filter\..*\.(clean|process)$",
+        repo, "config", "--includes", "--null", "--name-only", "--get-regexp", r"^filter\.",
         env=env, check=False,
     )
     if result.returncode == 1:
-        return
-    if result.returncode != 0:
+        return env, False
+    if result.returncode != 0 or not result.stdout.endswith("\0"):
         raise SystemExit("cannot establish executable Git filter configuration")
-    effective = {}
-    for record in result.stdout.split("\0"):
-        if record:
-            key, _, value = record.partition("\n")
-            effective[key] = value
-    if any(effective.values()):
-        raise SystemExit(
-            "local review refuses configured executable Git clean/process filters; "
-            "use an explicit branch or commit review of committed content"
+    drivers: set[str] = set()
+    active_key: str | None = None
+    for key in dict.fromkeys(result.stdout.split("\0")[:-1]):
+        if not key.startswith("filter."):
+            raise SystemExit("invalid Git filter configuration key")
+        driver, separator, field = key.removeprefix("filter.").rpartition(".")
+        if not separator or field not in {"clean", "process"}:
+            continue
+        value = git_result(
+            repo, "config", "--includes", "--null", "--get", key, env=env, check=False,
         )
+        if value.returncode != 0 or not value.stdout.endswith("\0") or value.stdout.count("\0") != 1:
+            raise SystemExit("cannot establish effective Git filter command")
+        if value.stdout.removesuffix("\0"):
+            drivers.add(driver)
+            active_key = key
+    if not drivers:
+        return env, False
+    child_env = {key: value for key, value in env.items()
+                 if key not in {"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"}
+                 and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+    overrides = [(f"filter.{driver}.{field}", value)
+                 for driver in sorted(drivers)
+                 for field, value in (("clean", ""), ("process", ""), ("required", "true"))]
+    child_env["GIT_CONFIG_COUNT"] = str(len(overrides))
+    for index, (key, value) in enumerate(overrides):
+        # Keep arbitrary driver names separate from values, including '='.
+        child_env[f"GIT_CONFIG_KEY_{index}"] = key
+        child_env[f"GIT_CONFIG_VALUE_{index}"] = value
+    assert active_key is not None
+    applied = git_result(repo, "config", "--includes", "--null", "--get", active_key,
+                         env=child_env, check=False)
+    if applied.returncode != 0 or applied.stdout != "\0":
+        # Git versions without command-env configuration must fail closed.
+        raise SystemExit("Git cannot apply executable-filter protection")
+    return child_env, True
 
 
 def bounded_field(text: str, limit: int) -> str:

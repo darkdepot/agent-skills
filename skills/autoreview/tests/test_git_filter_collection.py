@@ -80,8 +80,8 @@ class GitFilterCollectionTests(unittest.TestCase):
         return shlex.join((Path(sys.executable).as_posix(), script.as_posix()))
 
     def observe(self, *, exact_index=False):
-        # Successful native diffs can refresh the index's stat cache. Preserve
-        # staged entries; refusal must preserve even those cached stat bytes.
+        # Native collection can refresh stat caches before succeeding or failing.
+        # Preserve staged entries; exact bytes are for pure preflight schedules.
         result = {
             str(path.relative_to(self.repo)): path.read_bytes()
             for path in self.repo.rglob("*") if path.is_file()
@@ -144,20 +144,54 @@ class GitFilterCollectionTests(unittest.TestCase):
         )
 
     def assert_refused_without_dispatch(self):
-        before = self.observe(exact_index=True)
         for label, call in self.collection_calls():
             with self.subTest(entrypoint=label):
+                before = self.observe()
                 failure = None
+                result = None
                 try:
-                    call()
+                    result = call()
                 except SystemExit as exc:
                     failure = exc
                 # Check observable safety even when baseline returns or raises.
                 self.assertFalse(self.clean_marker.exists(), "clean command executed")
                 self.assertFalse(self.process_marker.exists(), "process command executed")
-                self.assertEqual(self.observe(exact_index=True), before, "collection mutated fixture inputs")
-                self.assertIsNotNone(failure, "configured conversion must refuse collection")
-                self.assertRegex(str(failure), r"(?i)filter")
+                self.assertEqual(self.observe(), before, "collection mutated fixture inputs")
+                if label in {"unstaged patch", "local bundle"}:
+                    self.assertIsNotNone(failure, "conversion-dependent content must not be accepted")
+                if failure is not None:
+                    self.assertRegex(str(failure), r"(?i)filter")
+                elif label == "selection":
+                    self.assertIs(result, True, "conversion-dependent content must not select clean")
+                elif label == "status":
+                    self.assertIn("data.txt", result, "status must retain the affected path")
+                elif label == "unstaged names":
+                    self.assertIn("data.txt", result.split("\0"), "name selection must retain the affected path")
+
+    def assert_successful_bundle(self, paths, *patch_fragments):
+        before = self.observe()
+        self.assertTrue(self.helper["is_dirty"](self.repo))
+        bundle = self.helper["local_bundle"](self.repo)
+        self.assertEqual(bundle.paths, paths)
+        for fragment in patch_fragments:
+            self.assertIn(fragment, bundle.text)
+        self.assertFalse(self.clean_marker.exists())
+        self.assertFalse(self.process_marker.exists())
+        self.assertEqual(self.observe(), before)
+        return bundle
+
+    def commit_marker_cleaner(self):
+        # Preparation is native Git with no configured converter.
+        self.cleaner.write_text(self.marker_script(self.clean_marker), encoding="utf-8")
+        git(self.repo, "add", "cleaner.py")
+        git(self.repo, "commit", "-qm", "synthetic dormant marker script")
+
+    def refresh_known_clean_stat(self):
+        # Avoid a racy index entry without sleeping or invoking a configured
+        # converter: callers arm the filter only after this native refresh.
+        info = self.data.stat()
+        os.utime(self.data, ns=(info.st_atime_ns, info.st_mtime_ns - 2_000_000_000))
+        git(self.repo, "update-index", "--refresh")
 
     def native_positive_control(self, marker: Path):
         failure = None
@@ -266,13 +300,126 @@ class GitFilterCollectionTests(unittest.TestCase):
         self.assert_refused_without_dispatch()
         self.native_positive_control(self.clean_marker)
 
-    def test_unused_executable_driver_still_refuses_conservative_local_collection(self):
-        self.arm_clean(driver="unused")
-        self.assert_refused_without_dispatch()
-        # The fixture has no attribute selecting unused: refusal is intentional.
-        git(self.repo, "--no-optional-locks", "diff", "--no-ext-diff", "--no-textconv", "--patch")
+    def test_unused_executable_driver_preserves_the_complete_local_bundle(self):
+        self.commit_marker_cleaner()
+        self.configure("filter.unused.clean", self.command(self.cleaner))
+        self.configure("filter.unused.process", self.command(self.processor))
+        self.configure("filter.unused.required", "true")
+        self.edit_data()
+        # No attribute selects unused, so data needs no executable conversion.
+        self.assert_successful_bundle({"data.txt"}, "+edited content, different size")
+
+    def test_missing_command_environment_support_refuses_before_collection(self):
+        self.arm_clean()
+        owner = self.helper["disable_git_filters"].__globals__
+        original = owner["git_result"]
+
+        def without_overlays(repo, *args, **kwargs):
+            env = kwargs.get("env")
+            if env and "GIT_CONFIG_COUNT" in env:
+                kwargs["env"] = {key: value for key, value in env.items()
+                                 if key != "GIT_CONFIG_COUNT"
+                                 and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+            return original(repo, *args, **kwargs)
+
+        with mock.patch.dict(owner, {"git_result": without_overlays}):
+            with self.assertRaisesRegex(SystemExit, "cannot apply executable-filter protection"):
+                self.helper["local_bundle"](self.repo)
         self.assertFalse(self.clean_marker.exists())
         self.assertFalse(self.process_marker.exists())
+
+    def test_multiline_command_is_not_confused_with_a_configuration_key(self):
+        self.arm_clean()
+        self.configure("filter.probe.clean", self.command(self.cleaner) + "\n" + self.command(self.cleaner))
+        self.assert_refused_without_dispatch()
+        self.native_positive_control(self.clean_marker)
+
+    def test_stat_clean_filtered_neighbor_preserves_an_unrelated_edit(self):
+        self.commit_marker_cleaner()
+        self.refresh_known_clean_stat()
+        self.configure("filter.probe.clean", self.command(self.cleaner))
+        self.configure("filter.probe.process", self.command(self.processor))
+        self.configure("filter.probe.required", "true")
+        # Do not touch data.txt or its stat fields after the fixture refresh.
+        self.unchanged.write_bytes(b"ordinary unrelated edit\n")
+        bundle = self.assert_successful_bundle({"unchanged.txt"}, "+ordinary unrelated edit")
+        self.assertNotIn("diff --git a/data.txt b/data.txt", bundle.text)
+
+    def test_staged_only_filtered_path_preserves_its_committed_object_diff(self):
+        self.commit_marker_cleaner()
+        self.data.write_bytes(b"staged only change\n")
+        git(self.repo, "add", "data.txt")
+        self.refresh_known_clean_stat()
+        expected_patch = git(
+            self.repo, "--no-optional-locks", "diff", *self.helper["SAFE_DIFF_FLAGS"],
+            "--cached", "--patch",
+        )
+        self.configure("filter.probe.clean", self.command(self.cleaner))
+        self.configure("filter.probe.process", self.command(self.processor))
+        self.configure("filter.probe.required", "true")
+        bundle = self.assert_successful_bundle({"data.txt"}, expected_patch, "+staged only change")
+        self.assertEqual(bundle.text.count("diff --git a/data.txt b/data.txt"), 1)
+
+    def test_deleted_filtered_path_needs_no_converter_to_review_its_old_blob(self):
+        self.commit_marker_cleaner()
+        self.configure("filter.probe.clean", self.command(self.cleaner))
+        self.configure("filter.probe.process", self.command(self.processor))
+        self.configure("filter.probe.required", "true")
+        self.data.unlink()
+        self.assert_successful_bundle({"data.txt"}, "deleted file mode", "-original")
+
+    def test_same_size_clean_filter_edit_never_becomes_a_false_clean_or_raw_patch(self):
+        self.arm_clean()
+        indexed = git(self.repo, "show", ":data.txt")
+        self.data.write_bytes(b"modified\n")
+        self.assertEqual(len(self.data.read_bytes()), len(indexed.encode("utf-8")))
+        self.assertNotEqual(self.data.read_text(encoding="utf-8"), indexed)
+        info = self.data.stat()
+        os.utime(self.data, ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
+        self.assert_refused_without_dispatch()
+        self.native_positive_control(self.clean_marker)
+
+    def test_same_size_process_filter_edit_never_becomes_a_false_clean_or_raw_patch(self):
+        self.arm_process()
+        indexed = git(self.repo, "show", ":data.txt")
+        self.data.write_bytes(b"modified\n")
+        self.assertEqual(len(self.data.read_bytes()), len(indexed.encode("utf-8")))
+        self.assertNotEqual(self.data.read_text(encoding="utf-8"), indexed)
+        info = self.data.stat()
+        os.utime(self.data, ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
+        self.assert_refused_without_dispatch()
+        self.native_positive_control(self.process_marker)
+
+    def test_raw_different_normalized_clean_content_cannot_be_reviewed_as_passthrough(self):
+        normalize = "sys.stdout.buffer.write(sys.stdin.buffer.read().lower())\n"
+        self.cleaner.write_text("import sys\n" + normalize, encoding="utf-8")
+        self.configure("filter.probe.clean", self.command(self.cleaner))
+        self.configure("filter.probe.required", "true")
+        self.data.write_bytes(b"ORIGINAL\n")
+        git(self.repo, "add", "cleaner.py", "data.txt")
+        git(self.repo, "commit", "-qm", "synthetic case normalization")
+        self.assertEqual(git(self.repo, "show", ":data.txt"), "original\n")
+        self.assertEqual(self.data.read_bytes(), b"ORIGINAL\n")
+        # Keep the same conversion, but make forbidden dispatch observable.
+        self.cleaner.write_text(
+            "from pathlib import Path\nimport sys\n"
+            f"Path({str(self.clean_marker)!r}).write_text('synthetic dispatch\\n', encoding='utf-8')\n"
+            + normalize,
+            encoding="utf-8",
+        )
+        self.unchanged.write_bytes(b"ordinary unrelated edit\n")
+        info = self.data.stat()
+        os.utime(self.data, ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
+        self.assert_refused_without_dispatch()
+        # Independent native control proves raw bytes differ but normalized
+        # content does not: accepting an uppercase raw patch would be wrong.
+        native_patch = git(
+            self.repo, "--no-optional-locks", "diff", "--no-ext-diff", "--no-textconv", "--patch",
+        )
+        self.assertTrue(self.clean_marker.exists())
+        self.assertNotIn("diff --git a/data.txt b/data.txt", native_patch)
+        self.assertIn("+ordinary unrelated edit", native_patch)
+        self.clean_marker.unlink()
 
     def test_unknown_filter_attribute_without_command_still_collects_normally(self):
         self.edit_data()
