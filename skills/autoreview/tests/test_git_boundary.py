@@ -59,7 +59,7 @@ class GitFixtureIsolationTests(unittest.TestCase):
     def fixture(self, owner, parent):
         if owner == "hardening":
             repo = init_repo(parent)
-            (repo / "fixture.txt").write_text("fixture\n")
+            (repo / "fixture.txt").write_bytes(b"fixture\n")
             git(repo, "add", ".")
             git(repo, "commit", "-qm", "fixture")
         else:
