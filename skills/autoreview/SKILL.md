@@ -68,6 +68,21 @@ validated scalar value reaches diff/status; other global and system Git
 configuration stays disabled. Repository-owned or relative global-config
 overrides are not imported, and reviewed source bytes are not rewritten.
 
+Local collection disables effective Git clean/process commands and requires
+conversion to succeed. Unused drivers, unchanged filtered neighbors, staged-only
+changes, and deletions can still be reviewed without executing converters.
+If Git needs executable conversion to assemble the diff, collection fails before
+any reviewer starts. This can include an unchanged filtered file whose stat cache
+needs refreshing. Use explicit branch or commit mode for committed content in
+that case. Built-in line-ending normalization remains enabled; raw bytes never
+stand in for a required executable conversion.
+PR-base discovery uses trusted external Git and a scoped GitHub CLI environment,
+preserving external authentication/configuration and proxy settings while excluding
+inherited Git routing, `GH_REPO` redirection, and checkout-owned executables.
+A differently named `AUTOREVIEW_GIT` override that cannot also be selected as `git`
+by the child requires an explicit `--base`; rejected GitHub configuration paths
+also require one.
+
 ## Context and severity
 
 Use `--prompt` for task-specific guidance, or `--prompt-file` and `--dataset` for
@@ -166,7 +181,8 @@ resolved executable (or the unresolved selection); it never means `scoped-clean`
 Set `AUTOREVIEW_GIT` to a trusted external Git executable to override every
 helper-owned Git invocation. On macOS with a broken selected Xcode, use
 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` for the invocation.
-Only `DEVELOPER_DIR` is additionally retained in Git's sanitized environment;
+Only an absolute, external `DEVELOPER_DIR` is additionally retained in Git's
+sanitized environment;
 neither override is forwarded to the isolated reviewer environment.
 
 Every reviewer pass must inspect its bundle for real credentials and report
