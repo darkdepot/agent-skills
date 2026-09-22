@@ -210,6 +210,11 @@ class ReviewPass(NamedTuple):
     evidence_batch: int = 1
 
 
+class ReviewResult(NamedTuple):
+    report: dict[str, Any]
+    complete: bool
+
+
 class MixedContextCapacityError(SystemExit):
     """A pack may fit after rebatching evidence, never by detaching source."""
 
@@ -484,6 +489,16 @@ SCHEMA: dict[str, Any] = {
         },
         "overall_explanation": {"type": "string", "minLength": 1, "maxLength": 3000},
         "overall_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    },
+}
+
+# Completion belongs to the provider boundary, not the published report format.
+PROVIDER_SCHEMA = {
+    **SCHEMA,
+    "required": [*SCHEMA["required"], "review_completion"],
+    "properties": {
+        **SCHEMA["properties"],
+        "review_completion": {"type": "string", "enum": ["complete", "incomplete"]},
     },
 }
 
@@ -3640,10 +3655,16 @@ def render_review_prompt(
 
         This review is noninteractive. Complete it from the available evidence;
         describe material uncertainty in overall_explanation instead of asking questions.
+
+        This pass is an independent, complete assignment for the supplied change and evidence.
+        There is no shared conversation or future evidence batch for you to wait for.
+        Set review_completion to complete only after finishing this assignment.
+        If you defer judgment or leave the assessment unfinished, set it to incomplete.
+
         Return one JSON object matching this schema, without Markdown fences.
         Pin each finding to the smallest file/line location that demonstrates it.
         If no actionable defects meet the requested threshold, return no findings and mark the patch correct.
-        {json.dumps(SCHEMA)}
+        {json.dumps(PROVIDER_SCHEMA)}
 
         Review target: {target_line}
         Current branch: {branch}
@@ -5084,7 +5105,7 @@ def run_codex(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         raise SystemExit("--no-tools is not supported by the Codex engine; use --engine claude --no-tools for a no-tools run")
     ensure_codex_isolation_supported(args, repo)
     temp_root = safe_temp_root(repo, engine="codex")
-    schema_path = write_json_temp(SCHEMA, temp_root)
+    schema_path = write_json_temp(PROVIDER_SCHEMA, temp_root)
     with tempfile.NamedTemporaryFile(
         "w",
         suffix=".json",
@@ -5195,7 +5216,7 @@ def run_claude(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         "--output-format",
         "stream-json" if args.stream_engine_output else "json",
         "--json-schema",
-        json.dumps(SCHEMA),
+        json.dumps(PROVIDER_SCHEMA),
     ]
     if args.tools:
         allowed_tools = claude_allowed_tools(args)
@@ -5259,7 +5280,7 @@ def amp_review_plugin_source(
     structured_schema = {
         "name": "autoreview_report",
         "description": "A security-focused code-review report for the supplied patch.",
-        "fields": SCHEMA["properties"],
+        "fields": PROVIDER_SCHEMA["properties"],
     }
     return textwrap.dedent(
         f"""
@@ -6448,8 +6469,8 @@ def number_in_range(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 1
 
 
-def review_status(report: dict[str, Any]) -> str:
-    if (report.get("scope_rejected_findings") or report.get("missing_required_findings")
+def review_status(report: dict[str, Any], *, complete: bool) -> str:
+    if (not complete or report.get("scope_rejected_findings") or report.get("missing_required_findings")
             or report.get("attribution_rejected_findings")):
         return "incomplete"
     if report["findings"]:
@@ -6487,7 +6508,7 @@ def print_findings(findings: list[dict[str, Any]]) -> None:
 def print_report(report: dict[str, Any], *, label: str = "autoreview") -> None:
     findings = report["findings"]
     display_label = display_escape(label, 200)
-    status = review_status(report)
+    status = report["review_status"]
     if status == "incomplete":
         print(f"{display_label} incomplete: selected scope could not be certified")
     elif status == "filtered":
@@ -6515,11 +6536,12 @@ def print_report(report: dict[str, Any], *, label: str = "autoreview") -> None:
             print_findings(report[key])
     for needle in report.get("missing_required_findings", []):
         print(f"required finding text not found: {display_escape(needle, 2000)}")
-    print(f"overall: {report['overall_correctness']} ({report['overall_confidence']})")
+    observation = "provider observation (incomplete review): " if status == "incomplete" else ""
+    print(f"{observation}overall: {report['overall_correctness']} ({report['overall_confidence']})")
     print(display_escape(report["overall_explanation"], 3000, multiline=True))
     for entry in report.get("pass_reports", []):
         provider = entry["report"]
-        print(f"{display_escape(entry['label'], 200)} overall: "
+        print(f"{display_escape(entry['label'], 200)} {observation}overall: "
               f"{provider['overall_correctness']} ({provider['overall_confidence']})")
         print(display_escape(provider["overall_explanation"], 3000, multiline=True))
 
@@ -6955,7 +6977,7 @@ def run_reviewer(
     changed_paths: set[str] | CapturedBundle,
     required: list[str],
     evidence: list[EvidenceFile] | None = None,
-) -> dict[str, Any]:
+) -> ReviewResult:
     mixed = changed_paths.mixed if isinstance(changed_paths, CapturedBundle) else ()
     paths = changed_paths.paths if isinstance(changed_paths, CapturedBundle) else changed_paths
     available = {record.identity for record in prompt.chunk.sources} if isinstance(prompt, ReviewPass) else set()
@@ -6970,6 +6992,9 @@ def run_reviewer(
     raw = run_engine(args, repo, outgoing)
     try:
         report = extract_json(raw)
+        completion = report.pop("review_completion", None)
+        if not isinstance(completion, str) or completion not in {"complete", "incomplete"}:
+            raise SystemExit("review engine returned missing or invalid review_completion")
         provider_report = copy.deepcopy(report)
         validate_report(report, repo, paths, [], mixed, available)
     except (SystemExit, ValueError, RecursionError) as exc:
@@ -6981,7 +7006,7 @@ def run_reviewer(
     if mixed:
         report["available_source_records"] = sorted(available)
     require_findings(report, required)
-    return report
+    return ReviewResult(report, completion == "complete")
 
 
 def merge_chunk_reports(reports: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
@@ -7060,8 +7085,8 @@ def run_review_passes(
     prompts: list[str] | list[ReviewPass],
     changed_paths: set[str] | CapturedBundle,
     evidence: list[EvidenceFile] | None = None,
-) -> list[tuple[str, dict[str, Any]]]:
-    chunk_reports: list[tuple[str, dict[str, Any]]] = []
+) -> list[tuple[str, ReviewResult]]:
+    chunk_reports: list[tuple[str, ReviewResult]] = []
     for index, prompt in enumerate(prompts, start=1):
         if len(prompts) > 1:
             print(
@@ -7230,7 +7255,7 @@ def main_impl() -> int:
                 "rerun autoreview against the updated tree"
             )
     try:
-        chunk_reports = run_review_passes(
+        pass_results = run_review_passes(
             args,
             reviewers,
             repo,
@@ -7241,6 +7266,7 @@ def main_impl() -> int:
     except ReviewerUnavailable as exc:
         write_review_status(args, "reviewer_unavailable", 1, exc)
         raise
+    chunk_reports = [(label, result.report) for label, result in pass_results]
     if len(chunk_reports) == 1 and not captured.mixed:
         report = chunk_reports[0][1]
     else:
@@ -7248,7 +7274,9 @@ def main_impl() -> int:
     missing = missing_required_findings(report, args.require_finding)
     if missing:
         report["missing_required_findings"] = missing
-    report["review_status"] = review_status(report)
+    report["review_status"] = review_status(
+        report, complete=all(result.complete for _, result in pass_results),
+    )
     label = "autoreview"
     if len(chunk_reports) > 1:
         label += " chunked"

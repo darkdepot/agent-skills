@@ -86,6 +86,7 @@ report = {
     "overall_correctness": "patch is correct",
     "overall_explanation": "fake codex clean",
     "overall_confidence": 0.99,
+    "review_completion": "complete",
 }
 Path(output_path).write_text(json.dumps(report))
 print("fake codex ok")
@@ -118,6 +119,7 @@ report = {
     "overall_correctness": "patch is correct",
     "overall_explanation": "fake claude clean",
     "overall_confidence": 0.99,
+    "review_completion": "complete",
 }
 print(json.dumps(report))
 '''
@@ -148,6 +150,7 @@ report = {
     "overall_correctness": "patch is correct",
     "overall_explanation": "fake pi clean",
     "overall_confidence": 0.99,
+    "review_completion": "complete",
 }
 print(json.dumps(report))
 	'''
@@ -175,6 +178,7 @@ report = {
     "overall_correctness": "patch is correct",
     "overall_explanation": "fake kimi clean",
     "overall_confidence": 0.99,
+    "review_completion": "complete",
 }
 print(json.dumps(report))
 '''
@@ -684,6 +688,7 @@ class AutoreviewMixedTargetTests(unittest.TestCase):
                 "run_engine": lambda _args, _repo, prompt: sends.append(prompt) or json.dumps({
                     "findings": [], "overall_correctness": "patch is correct",
                     "overall_explanation": "Synthetic clean.", "overall_confidence": 0.9,
+                    "review_completion": "complete",
                 }),
             }), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 passes = self.helper["prepare_review_prompts"](repo, "local", None, captured, "", evidence, 30_000)
@@ -696,6 +701,55 @@ class AutoreviewMixedTargetTests(unittest.TestCase):
                 for record in item.chunk.sources:
                     self.assertIn(record.index.content, sent)
                     self.assertIn(record.working_tree.content, sent)
+
+    def test_unfinished_mixed_pass_retains_valid_attribution_without_certifying_scope(self):
+        with self.migration() as (repo, *_):
+            captured = self.helper["local_bundle"](repo)
+            record = captured.mixed[0]
+            finding = {
+                "title": "Synthetic claim", "body": "A concrete migration defect.",
+                "priority": "P2", "confidence": 0.8, "category": "bug",
+                "code_location": {"file_path": record.path, "line": 1},
+                "source_attribution": {
+                    "target": "index", "record_id": record.identity,
+                    "source_id": record.index.identity, "side": "present",
+                    "column": 1, "excerpt": "obsolete(0)",
+                },
+            }
+            provider = {
+                "findings": [finding], "overall_correctness": "patch is incorrect",
+                "overall_explanation": "Awaiting another batch.", "overall_confidence": 0.2,
+            }
+            prepare = self.helper["prepare_review_prompts"]
+            for completions in (("incomplete",), ("incomplete", "complete"), ("complete", "incomplete")):
+                with self.subTest(completions=completions):
+                    output, status = repo.parent / "result.json", repo.parent / "status.json"
+                    engine = mock.Mock(side_effect=[
+                        json.dumps({**provider, "review_completion": completion}) for completion in completions
+                    ])
+                    argv = [str(SCRIPT), "--mode", "local", "--max-priority", "P2",
+                            "--require-finding", "Synthetic claim", "--expect-findings",
+                            "--json-output", str(output), "--status-output", str(status)]
+                    text = io.StringIO()
+                    with mock.patch.dict(self.helper["main_impl"].__globals__, {
+                        "repo_root": lambda: repo,
+                        "prepare_review_prompts": lambda *args: prepare(*args) * len(completions),
+                        "run_engine": engine,
+                    }), mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(text):
+                        self.assertEqual(self.helper["main_impl"](), 2)
+                    result = json.loads(output.read_text())
+                    self.assertEqual(engine.call_count, len(completions))
+                    self.assertEqual(result["review_status"], "incomplete")
+                    self.assertEqual(result["findings"][0]["source_attribution"], finding["source_attribution"])
+                    self.assertNotIn("attribution_rejected_findings", result)
+                    self.assertNotIn("missing_required_findings", result)
+                    self.assertEqual(len(result["pass_reports"]), len(completions))
+                    for entry in result["pass_reports"]:
+                        self.assertEqual(entry["report"]["provider_report"], provider)
+                    self.assertNotIn("review_completion", output.read_text())
+                    self.assertTrue(json.loads(status.read_text())["report_produced"])
+                    self.assertIn("provider observation (incomplete review)", text.getvalue())
+                    self.assertNotIn("scoped-clean", text.getvalue())
 
     def test_honest_capacity_refusal_and_no_legacy_metadata_bypass(self):
         with self.migration() as (repo, *_):
@@ -761,7 +815,7 @@ class AutoreviewMixedTargetTests(unittest.TestCase):
                         with mock.patch.dict(self.helper["main_impl"].__globals__, {
                             "repo_root": lambda: repo,
                             "prepare_review_prompts": lambda *args: original_prepare(*args) * count,
-                            "run_engine": lambda *_: json.dumps(provider),
+                            "run_engine": lambda *_: json.dumps({**provider, "review_completion": "complete"}),
                         }), mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(text), \
                                 contextlib.redirect_stderr(io.StringIO()):
                             self.assertEqual(self.helper["main_impl"](), expected_exit)
@@ -950,6 +1004,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
                 return json.dumps({
                     "findings": [], "overall_correctness": "patch is correct",
                     "overall_explanation": "fixture clean", "overall_confidence": 0.99,
+                    "review_completion": "complete",
                 })
 
             with mock.patch.dict(self.helper["main_impl"].__globals__, {
@@ -1555,7 +1610,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
 
             def run_engine(_args, _repo, prompt):
                 sent.append(prompt)
-                return json.dumps(report)
+                return json.dumps({**report, "review_completion": "complete"})
 
             main = self.helper["main_impl"]
             with mock.patch.dict(main.__globals__, {
@@ -1702,7 +1757,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
 
                         def run_engine(_args, _repo, prompt):
                             sends.append(prompt)
-                            return json.dumps(provider_report)
+                            return json.dumps({**provider_report, "review_completion": "complete"})
 
                         argv = [str(SCRIPT), "--engine", engine, "--mode", mode, "--max-priority", "P2",
                                 "--dataset", e2e, "--prompt-file", "context.md", "--prompt", "Review the complete candidate.",
@@ -1783,7 +1838,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
                         with mock.patch.dict(self.helper["main_impl"].__globals__, {
                             "repo_root": lambda: repo,
                             "build_review_prompts": lambda *_args: ["synthetic pack"] * count,
-                            "run_engine": lambda *_args: json.dumps(provider),
+                            "run_engine": lambda *_args: json.dumps({**provider, "review_completion": "complete"}),
                         }), mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                             self.assertEqual(self.helper["main_impl"](), exit_code)
                         result = json.loads((root / "result.json").read_text())
@@ -1911,7 +1966,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
                         if scenario == "required-conversion":
                             raise AssertionError("partial conversion-dependent scope reached reviewer")
                         self.assertEqual(selected_repo, repo)
-                        return json.dumps(provider_report)
+                        return json.dumps({**provider_report, "review_completion": "complete"})
 
                     engine = mock.Mock(side_effect=reply)
                     stdout, stderr = io.StringIO(), io.StringIO()
@@ -1964,9 +2019,83 @@ class AutoreviewHardeningTests(unittest.TestCase):
                     self.assertEqual({path.name for path in output_dir.iterdir()},
                                      {"report.txt", "report.json", "status.json"})
 
+    def test_completion_finalizes_status_once_and_preserves_provider_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            repo = init_repo(root)
+            git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+            (repo / "source.txt").write_text("changed\n")
+            status_fn = self.helper["review_status"]
+            for completions in (("complete",), ("incomplete",), ("incomplete", "complete"), ("complete", "incomplete")):
+                for has_finding in (False, True):
+                    for expect in (False, True):
+                        for save_text in (False, True):
+                            with self.subTest(completions=completions, finding=has_finding, expect=expect, save_text=save_text):
+                                providers = [{
+                                    "findings": [{
+                                        "title": "Synthetic defect", "body": "Retain this observation.",
+                                        "priority": "P2", "confidence": 0.01, "category": "bug",
+                                        "code_location": {"file_path": "source.txt", "line": 1},
+                                    }] if has_finding else [],
+                                    "overall_correctness": "patch is incorrect" if has_finding else "patch is correct",
+                                    "overall_explanation": (
+                                        "Awaiting the second evidence batch before a final review verdict."
+                                        if completion == "incomplete" else "Finished this assigned assessment."
+                                    ),
+                                    "overall_confidence": 0.01,
+                                } for completion in completions]
+                                engine = mock.Mock(side_effect=[
+                                    json.dumps({**provider, "review_completion": completion})
+                                    for provider, completion in zip(providers, completions)
+                                ])
+                                result_path, status_path, text_path = (
+                                    root / name for name in ("result.json", "status.json", "result.txt")
+                                )
+                                argv = [str(SCRIPT), "--mode", "local", "--max-priority", "P2",
+                                        "--json-output", str(result_path), "--status-output", str(status_path)]
+                                if expect:
+                                    argv.append("--expect-findings")
+                                if save_text:
+                                    argv += ["--output", str(text_path)]
+                                complete = all(value == "complete" for value in completions)
+                                expected_status = "incomplete" if not complete else "findings" if has_finding else "scoped-clean"
+                                expected_exit = 2 if not complete else int(not has_finding) if expect else int(has_finding)
+                                finalized = mock.Mock(wraps=status_fn)
+                                text = io.StringIO()
+                                with mock.patch.dict(self.helper["main_impl"].__globals__, {
+                                    "repo_root": lambda: repo,
+                                    "build_review_prompts": lambda *_: ["synthetic pack"] * len(completions),
+                                    "run_engine": engine, "review_status": finalized,
+                                }), mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(text), \
+                                        contextlib.redirect_stderr(io.StringIO()):
+                                    self.assertEqual(self.helper["main_impl"](), expected_exit)
+                                finalized.assert_called_once()
+                                self.assertEqual(engine.call_count, len(completions))
+                                result = json.loads(result_path.read_text())
+                                self.assertEqual(result["review_status"], expected_status)
+                                self.assertEqual(result["overall_confidence"], 0.01)
+                                self.assertEqual(bool(result["findings"]), has_finding)
+                                retained = ([result] if len(completions) == 1
+                                            else [entry["report"] for entry in result["pass_reports"]])
+                                self.assertEqual([entry["provider_report"] for entry in retained], providers)
+                                self.assertNotIn("review_completion", result_path.read_text())
+                                self.assertEqual(json.loads(status_path.read_text()), {
+                                    "schema_version": 1, "status": expected_status, "exit_code": expected_exit,
+                                    "engine": "codex", "report_produced": True, "reason": None,
+                                    "reviewer_exit_code": None, "timed_out": False,
+                                })
+                                for provider in providers:
+                                    self.assertIn(provider["overall_explanation"], text.getvalue())
+                                if save_text:
+                                    self.assertIn(text_path.read_text(), text.getvalue())
+                                if not complete:
+                                    self.assertNotIn("scoped-clean", text.getvalue())
+                                    self.assertIn("provider observation (incomplete review)", text.getvalue())
+
     def test_status_unavailable_and_local_refusals_remain_distinct(self) -> None:
-        clean = json.dumps({"findings": [], "overall_correctness": "patch is correct",
-                            "overall_explanation": "Synthetic review.", "overall_confidence": 0.9})
+        public = {"findings": [], "overall_correctness": "patch is correct",
+                  "overall_explanation": "Synthetic review.", "overall_confidence": 0.9}
+        clean = json.dumps({**public, "review_completion": "complete"})
         unavailable = self.helper["ReviewerUnavailable"]
         cases = (
             ("engine", unavailable("DIAGNOSTIC_SENTINEL", result=subprocess.CompletedProcess([], 7, "", "")), "engine_failed"),
@@ -1974,8 +2103,12 @@ class AutoreviewHardeningTests(unittest.TestCase):
             ("invalid-json", "not JSON", "invalid_report"),
             ("invalid-schema", '{"findings": []}', "invalid_report"),
             ("invalid-field-type", json.dumps({"findings": [], "overall_correctness": [],
-                                               "overall_explanation": "Invalid enum", "overall_confidence": 0.9}), "invalid_report"),
+                                               "overall_explanation": "Invalid enum", "overall_confidence": 0.9,
+                                               "review_completion": "complete"}), "invalid_report"),
             ("invalid-event-type", '[{"type":"assistant","message":{"content":null}}]', "invalid_report"),
+            ("missing-completion", json.dumps(public), "invalid_report"),
+            *((f"invalid-completion-{index}", json.dumps({**public, "review_completion": value}), "invalid_report")
+              for index, value in enumerate(("", "deferred", [], {}, None, 42, False))),
             ("isolation", SystemExit("isolation refused"), None),
             ("spawn", OSError("cannot execute reviewer"), None),
         )
@@ -1989,9 +2122,11 @@ class AutoreviewHardeningTests(unittest.TestCase):
                     with self.subTest(count=count, label=label):
                         sidecar = root / "status.json"
                         report = root / "result.json"
+                        human = root / "result.txt"
                         sidecar.write_text('{"status":"scoped-clean"}')
                         argv = [str(SCRIPT), "--mode", "local", "--engine", "codex",
-                                "--status-output", str(sidecar), "--json-output", str(report)]
+                                "--status-output", str(sidecar), "--json-output", str(report),
+                                "--output", str(human)]
                         engine = mock.Mock(side_effect=[clean] * (count - 1) + [failure])
                         with mock.patch.dict(self.helper["main_impl"].__globals__, {
                             "repo_root": lambda: repo,
@@ -2001,6 +2136,8 @@ class AutoreviewHardeningTests(unittest.TestCase):
                             with self.assertRaises((SystemExit, OSError)):
                                 self.helper["main_impl"]()
                         self.assertFalse(report.exists())
+                        self.assertFalse(human.exists())
+                        self.assertEqual(engine.call_count, count)
                         self.assertEqual(sidecar.exists(), reason is not None)
                         if reason:
                             text = sidecar.read_text()
@@ -2909,6 +3046,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
                             ),
                             "overall_explanation": "test review",
                             "overall_confidence": 0.9,
+                            "review_completion": "complete",
                         }
                     )
 
@@ -2922,9 +3060,11 @@ class AutoreviewHardeningTests(unittest.TestCase):
                                 args, [args], repo, prompts, {"source.txt"}
                             )
                     else:
-                        reports = self.helper["run_review_passes"](
+                        results = self.helper["run_review_passes"](
                             args, [args], repo, prompts, {"source.txt"}
                         )
+                        self.assertTrue(all(result.complete for _, result in results))
+                        reports = [(label, result.report) for label, result in results]
                         report = self.helper["merge_chunk_reports"](reports)
                         self.helper["require_findings"](report, args.require_finding)
                         self.assertEqual(report["overall_correctness"], "patch is incorrect")
@@ -4546,6 +4686,7 @@ else:
         ) -> subprocess.CompletedProcess[str]:
             observed["cwd"] = cwd
             observed["env"] = kwargs["env"]
+            observed["schema"] = json.loads(_cmd[_cmd.index("--json-schema") + 1])
             return subprocess.CompletedProcess([], 0, "{}", "")
 
         with tempfile.TemporaryDirectory() as tempdir:
@@ -4570,6 +4711,7 @@ else:
                 observed["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"],
                 "1",
             )
+            self.assertEqual(observed["schema"], self.helper["PROVIDER_SCHEMA"])
 
     def test_codex_env_rejects_executable_dbus_transport(self) -> None:
         old = os.environ.copy()
@@ -5194,7 +5336,7 @@ else:
             with contextlib.redirect_stderr(io.StringIO()):
                 self.helper["validate_report"](literal, repo, {"src/index.ts"}, [])
             self.assertEqual(literal["findings"], [])
-            self.assertEqual(self.helper["review_status"](literal), "incomplete")
+            self.assertEqual(self.helper["review_status"](literal, complete=True), "incomplete")
 
             for invalid_path in ("", 123, None, True):
                 with self.subTest(invalid_path=invalid_path):
@@ -5247,6 +5389,7 @@ else:
             "overall_explanation": "explanation\x07",
             "overall_confidence": 0.9,
         }
+        report["review_status"] = self.helper["review_status"](report, complete=True)
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
@@ -6860,6 +7003,7 @@ class AuthenticatedProxyTests(unittest.TestCase):
         proxy, forms = self.proxy_fixture()
         report = {"findings": [], "overall_correctness": "patch is incorrect",
                   "overall_explanation": "provider says " + " | ".join(forms), "overall_confidence": 0.8}
+        report["review_status"] = self.helper["review_status"](report, complete=True)
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HTTPS_PROXY": proxy}, clear=True):
             output = Path(tmp) / "report.json"
             self.helper["atomic_write_text"](output, json.dumps(self.helper["redact_proxy_report"](report)))
@@ -6911,6 +7055,7 @@ flag = "--output-last-message" if "--output-last-message" in sys.argv else "-o"
 Path(sys.argv[sys.argv.index(flag) + 1]).write_text(json.dumps({
     "findings": [], "overall_correctness": "patch is incorrect",
     "overall_explanation": "transport diagnostics: " + os.environ["HTTPS_PROXY"], "overall_confidence": 0.8,
+    "review_completion": "complete",
 }))
 ''')
             fake.chmod(0o755)

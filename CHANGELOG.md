@@ -22,6 +22,7 @@
 - Allow explicit trusted OpenAI Responses route projection through Autoreview's existing Codex config override, retaining native provider defaults, isolated catalogue snapshots, and trusted caller HOME only for selected POSIX authentication helpers.
 - Preserve Unicode and control characters in Autoreview's Codex configuration overrides and isolated Kimi TOML configuration.
 - Preserve provider conclusions, rejected findings, and distinct mixed-source claim variants; distinguish filtered and incomplete reviews from a scoped-clean result.
+- Keep unfinished Autoreview assessments incomplete while retaining validated provider observations and existing public report contracts. Thanks @vincentkoc.
 - Publish redacted coding sessions through Beam's authenticated read-only catalog; accept readable and named share URLs, ignore persisted agent messages, and keep transcript items within receiver limits.
 - Let Beam discover exact-limit session stores, retry short transcript/metadata reads, and stop publication on unexpected EOF.
 - Make agent transcripts explicit-request-only and trim before previews or publication, retaining native hosted-session sharing and partial-source notices.
