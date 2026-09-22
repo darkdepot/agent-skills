@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Refuse installer destinations that overlap source skills before any mutation, preventing recursive installs and source deletion with `--force`.
+
 **Highlights:** Authenticated proxy support for isolated reviews, explicit reviewer availability, and controlled session sharing.
 
 - Preflight Autoreview Git within 10 seconds, honor a trusted `AUTOREVIEW_GIT` override and macOS `DEVELOPER_DIR`, and accept absolute in-repository prompt files with existing evidence safeguards.
