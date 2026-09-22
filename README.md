@@ -207,6 +207,8 @@ HTML as local/private output unless it has been separately redacted and reviewed
 - Do not update vendored downstream snapshots by hand. Update this repo, then
   sync.
 
+See [docs/RELEASING.md](docs/RELEASING.md) for the source-release process.
+
 ## License
 
 MIT.

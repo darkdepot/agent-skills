@@ -2,12 +2,15 @@
 
 ## Unreleased
 
+## 0.1.0 - 2026-09-21
+
+**Highlights:** Safer Git collection and installation, explicit review completion, and reusable review and session workflows.
+
+- Prevent checkout-controlled Git execution during Autoreview PR-base discovery and collection; refuse executable conversion before review while preserving local diffs that need no converter and committed branch/commit reviews.
 - Refuse installer destinations that overlap source skills before any mutation, preventing recursive installs and source deletion with `--force`.
-
-**Highlights:** Authenticated proxy support for isolated reviews, explicit reviewer availability, and controlled session sharing.
-
+- Keep unfinished Autoreview assessments incomplete while retaining validated provider observations and existing public report contracts. Thanks @vincentkoc.
 - Preflight Autoreview Git within 10 seconds, honor a trusted `AUTOREVIEW_GIT` override and macOS `DEVELOPER_DIR`, and accept absolute in-repository prompt files with existing evidence safeguards.
-- Reject unsupported GPT-6 Astra reasoning efforts before Autoreview preparation, document explicit invocation, and keep source instructions subordinate to the noninteractive review contract. Thanks @coygeek.
+- Validate requested reasoning levels before Autoreview preparation and keep source instructions subordinate to the noninteractive review contract. Thanks @coygeek.
 - Support launcher-provided authenticated HTTP/SOCKS proxies in Autoreview, preserve external transport trust settings, and redact proxy credentials from diagnostics and reports without changing reviewer isolation. Thanks @fuller-stack-dev.
 - Fix Claude reviewer startup when the CLI truncates piped help output, while retaining mandatory isolation checks. Thanks @phyrexia.
 - Add opt-in Autoreview `--status-output` to distinguish unavailable reviewers from clean, adverse, filtered, and incomplete reviews without changing existing report JSON or exit codes. Thanks @coygeek.
@@ -17,14 +20,12 @@
 - Preserve complete Autoreview source and evidence without file or count caps, partitioning oversized inputs across review passes without truncation or partial-clean success.
 - Preserve base/index/working-tree source identity, literal paths, empty-source anchors, raw Git parents, and directory transitions; honor explicit local bases and normalize Git diff presentation.
 - Honor trusted global Git `core.autocrlf` during Autoreview selection while preserving local overrides, attributes, source bytes, and protected Git execution.
-- Prevent checkout-controlled Git execution during Autoreview PR-base discovery, disable executable clean/process conversion without blocking local diffs that need no converter, and isolate disposable fixture repositories from inherited Git routing and configuration. Conversion-dependent collection fails before review; committed branch/commit reviews remain available.
 - Respect an explicit Git `HOME` without evaluating an unavailable Windows platform-home fallback.
 - Remove the external TruffleHog requirement from Autoreview; keep isolated reviewer credential checks and leave any pre-send scanning to the caller. Thanks @Patrick-Erichsen.
 - Keep reviewer input, authentication, temporary files, and tools isolated; protect captured evidence against mutation and topology changes, and confine macOS reviewer scratch access.
 - Allow explicit trusted OpenAI Responses route projection through Autoreview's existing Codex config override, retaining native provider defaults, isolated catalogue snapshots, and trusted caller HOME only for selected POSIX authentication helpers.
 - Preserve Unicode and control characters in Autoreview's Codex configuration overrides and isolated Kimi TOML configuration.
 - Preserve provider conclusions, rejected findings, and distinct mixed-source claim variants; distinguish filtered and incomplete reviews from a scoped-clean result.
-- Keep unfinished Autoreview assessments incomplete while retaining validated provider observations and existing public report contracts. Thanks @vincentkoc.
 - Publish redacted coding sessions through Beam's authenticated read-only catalog; accept readable and named share URLs, ignore persisted agent messages, and keep transcript items within receiver limits.
 - Let Beam discover exact-limit session stores, retry short transcript/metadata reads, and stop publication on unexpected EOF.
 - Make agent transcripts explicit-request-only and trim before previews or publication, retaining native hosted-session sharing and partial-source notices.
