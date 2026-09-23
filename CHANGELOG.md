@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Default Autoreview to GPT-6 Astra with high reasoning; retain the automatic account-access-only Terra retry, explicit model selections, and Sol for existing none/minimal effort-only settings.
+- Default Autoreview to GPT-6 Sol with high reasoning and an account-access-only GPT-6 Luna retry; preserve explicit model choices and reject unsupported GPT-6 Sol/Luna minimal effort instead of selecting an older model.
 - Prefer OpenAI/Codex before Claude when choosing an Autoreview engine, including independent second opinions; retain explicit user choices and require a concrete Codex availability failure before switching.
 
 ## 0.1.0 - 2026-09-22
