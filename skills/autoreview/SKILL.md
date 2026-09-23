@@ -233,10 +233,10 @@ reviewed repository. When using `--status-output`, all output paths must differ;
 case-only and Unicode normalization aliases are conservatively refused on every
 platform, even when the filesystem would permit distinct files.
 
-| Exit | Meaning                                                                         |
-| ---- | ------------------------------------------------------------------------------- |
-| `0`  | `scoped-clean`, or a correct verdict with only filtered lower-priority findings |
-| `1`  | Accepted findings, an incorrect provider verdict, or a failed review attempt    |
+| Exit | Meaning                                                                            |
+| ---- | ---------------------------------------------------------------------------------- |
+| `0`  | `scoped-clean`, or a correct verdict with only filtered lower-priority findings    |
+| `1`  | Accepted findings, an incorrect provider verdict, or a failed review attempt       |
 | `2`  | Unfinished assessment, incomplete scope/attribution, or a missing required finding |
 
 Treat `scoped-clean` as clean only for the selected target and requested priority.
