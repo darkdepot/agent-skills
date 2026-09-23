@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add Autoreview `--source-context` for complete source bytes bound to the reviewed commit and blob, with strict credential-path and mutation guards, without expanding finding scope or changing generic evidence restrictions.
+
 - Prefer OpenAI/Codex before Claude when choosing an Autoreview engine, including independent second opinions; retain explicit user choices and require a concrete Codex availability failure before switching.
 
 ## 0.1.0 - 2026-09-22
