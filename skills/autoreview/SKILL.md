@@ -1,6 +1,6 @@
 ---
 name: autoreview
-description: "Structured code review when explicitly requested, preferring OpenAI/Codex before Claude."
+description: "Structured code review through Codex, Claude, Amp, Pi, Kimi, or Grok when explicitly requested."
 ---
 
 # Auto Review
@@ -123,6 +123,28 @@ The helper does not automatically fall back between engines.
 Use `--engine`, `--model`, and `--thinking` to override the defaults.
 `--codex-speed fast` selects priority service when supported. Only Claude accepts
 `--fallback-model`. Per-engine environment overrides use `AUTOREVIEW_<ENGINE>_*`.
+Grok defaults to `grok-4.7`. Its subscription-only bundle review mode always
+disables tools, web and X search, subagents, MCP, workflows, and skills;
+`--no-tools` and `--no-web-search` therefore do not relax or change the Grok
+boundary. Tools-on repository reading is not supported. The default effort is
+`low`; medium/high may end the turn with a preamble and no report, which the
+helper reports as `invalid_report` without retrying.
+
+Grok Build may extract `bundled/skills`, `agents`, `personas`, and `roles` into
+the isolated `GROK_HOME` after preparation; `grok inspect --json` does not list
+those bundled skills. The generated config keeps the inspected names in
+`skills.disabled` and sets `skills.ignore` to the runtime `GROK_HOME/bundled`,
+`GROK_HOME/skills`, isolated user home, and empty workspace. The strict
+`init.skills == []` runtime guard remains the fail-closed check for extraction
+or configuration drift.
+
+Observed `grok-4.7` bundle-review reliability on a real 43.7 KB diff:
+
+| Effort | Parseable reports | Observed incomplete turns and cost/time |
+| ------ | ----------------- | --------------------------------------- |
+| low (default) | 4/4 | 90–345 s; $0.01–$0.07 |
+| medium | 1/2 | one preamble-only turn; 25k output tokens, 372 s, $0.073 |
+| high | 3/5 | two preamble-only turns; 31.7k/34.5k output tokens, 453/480 s, about $0.09 |
 
 If your account cannot access Sol or Luna, pin an available model. To require
 GPT-6 Astra without a model fallback, select it explicitly:
@@ -185,6 +207,41 @@ split context overrides are unsupported when projection is selected.
 | Amp             | `AMP_API_KEY` for a plugin-free account; local POSIX execution, no custom endpoint or cloud/orb agent |
 | Pi              | CLI 0.79.0+; configured model; no tools or project resources                                          |
 | Kimi            | CLI 0.30.0+; configured model; Python 3.11+ or `tomli` for TOML config                                |
+| Grok            | Grok Build CLI, verified versions only (1.0.41); `grok login` with an account that has Grok Build access (model access confirmed by the orchestrator smoke); no API key; bundle review only: tools, web, X search, subagents, MCP, workflows and skills always off; runtime tool-inventory guard |
+
+### Verifying a new Grok Build version
+
+Do not broaden `GROK_VERIFIED_VERSIONS` from version ordering alone. With a live
+subscription login, run the candidate CLI in an isolated `GROK_HOME` using the
+same configuration and complete `GROK_DENIED_TOOLS` denylist as the helper.
+Confirm its help exposes the exact runtime option contract: `--prompt-file`,
+`--verbatim`, `--output-format`, `--model`, `--reasoning-effort`, `--max-turns`,
+`--no-subagents`, `--disable-web-search`, `--cwd`, and `--disallowed-tools`.
+`--prompt-file` is the single-turn headless entry point; the helper does not use
+`--single` or `-p`.
+The helper runs its version/help probe in a disposable isolated `GROK_HOME` with
+auto-update disabled, then rechecks the exact verified version in the prepared
+review runtime immediately before launching the reviewer.
+Capture `streaming-messages-json` and verify all of the following before adding
+the exact version tuple:
+
+- the first `system/init` event has `tools == []`, `skills == []`, and
+  `mcp_servers == []`;
+- a direct request to read a canary file produces no `tool_use`,
+  `server_tool_use`, or tool-result `user` event and does not reveal the file;
+- every terminal result that reports
+  `usage.server_tool_use.web_search_requests` reports exactly `0`; omission is
+  allowed, including for failed engine results;
+- the isolated run still returns a valid non-empty review result.
+- effort reliability: N runs at the default effort must all produce a parseable
+  report.
+- a second run in the same runtime home, after Grok has extracted `bundled/`,
+  still reports `init.skills == []`.
+
+Record the observed inventory and command in the change that extends the
+verified-version set. The runtime guard remains mandatory even for a verified
+version because it detects boundary drift after launch; it cannot undo an
+action that began before the delayed init event was observed.
 
 ## Runtime boundaries
 
@@ -274,8 +331,9 @@ A failed later pass never publishes a partial review report.
 
 `reason` is `engine_failed`, `invalid_report`, or `runtime_validation_failed`
 for unavailable reviewers and null for completed reviews. The last reason means
-Amp's post-launch isolation attestation or private-result validation refused
-the result; it is not a transient-provider classification. These guards still
+Amp's post-launch isolation attestation/private-result validation or Grok's
+runtime isolation guard refused the result; ordinary provider and engine errors
+remain `engine_failed`. These guards still
 run before report acceptance and retain their existing failure diagnostics.
 `reviewer_exit_code` is the last reviewer process's exit code when retained,
 including zero for rejected output, otherwise null. `timed_out` identifies the
