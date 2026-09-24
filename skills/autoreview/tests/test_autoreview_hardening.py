@@ -184,6 +184,94 @@ print(json.dumps(report))
 '''
 
 
+def fake_grok_script() -> str:
+    return r'''#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+if "--version" in args:
+    grok_home = os.environ.get("GROK_HOME")
+    user_home = os.environ.get("HOME")
+    user_profile = os.environ.get("USERPROFILE")
+    config_path = Path(grok_home, "config.toml") if grok_home else None
+    isolated = bool(
+        grok_home and user_home and user_profile and config_path
+        and config_path.is_file()
+        and "auto_update = false" in config_path.read_text(encoding="utf-8")
+    )
+    version_record = os.environ.get("AUTOREVIEW_FAKE_GROK_VERSION_RECORD")
+    if version_record:
+        with Path(version_record).open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({
+                "GROK_HOME": grok_home,
+                "HOME": user_home,
+                "USERPROFILE": user_profile,
+                "isolated": isolated,
+            }) + "\n")
+    if isolated and Path(grok_home, "auth.json").is_file():
+        bundled_skill = Path(grok_home, "bundled", "skills", "x", "SKILL.md")
+        bundled_skill.parent.mkdir(parents=True, exist_ok=True)
+        bundled_skill.write_text("# extracted bundled skill\n", encoding="utf-8")
+    print("grok 1.0.41 (test)" if isolated else "grok 1.0.42 (host-home)")
+    raise SystemExit(0)
+if "--help" in args:
+    print("--prompt-file --verbatim --output-format --disallowed-tools --max-turns --reasoning-effort --no-subagents --disable-web-search --cwd -m --model --no-auto-update")
+    raise SystemExit(0)
+if args == ["inspect", "--json"]:
+    print(json.dumps({"skills": [{"name": "bundled-alpha"}, {"name": "bundled-beta"}]}))
+    raise SystemExit(0)
+
+allowed_flags = {
+    "--prompt-file", "--verbatim", "--output-format", "--model",
+    "--reasoning-effort", "--max-turns", "--no-subagents",
+    "--disable-web-search", "--cwd", "--disallowed-tools", "--no-auto-update",
+}
+unknown_flags = [arg for arg in args if arg.startswith("-") and arg not in allowed_flags]
+if unknown_flags:
+    print("unknown flags: " + ", ".join(unknown_flags), file=sys.stderr)
+    raise SystemExit(64)
+
+home = Path(os.environ["GROK_HOME"])
+prompt = Path(args[args.index("--prompt-file") + 1]).read_text(encoding="utf-8")
+config = home.joinpath("config.toml").read_text(encoding="utf-8")
+bundled_skill = home.joinpath("bundled", "skills", "x", "SKILL.md")
+bundled_skill.parent.mkdir(parents=True, exist_ok=True)
+bundled_skill.write_text("# extracted bundled skill\n", encoding="utf-8")
+init_skills = [] if str(home / "bundled") in config else ["bundled:x"]
+record = {
+    "argv": args,
+    "cwd": os.getcwd(),
+    "prompt": prompt,
+    "home_entries": sorted(path.name for path in home.iterdir()),
+    "auth_mode": home.joinpath("auth.json").stat().st_mode & 0o777,
+    "config": config,
+    "env": {key: os.environ.get(key) for key in (
+        "GROK_HOME", "HOME", "USERPROFILE", "GROK_SUBAGENTS", "GROK_MEMORY",
+        "GROK_BACKEND_SEARCH", "GROK_MANAGED_MCPS_ENABLED", "XAI_API_KEY",
+        "GROK_DEPLOYMENT_KEY", "GROK_CONFIG", "AWS_CONFIG_FILE",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    )},
+}
+Path(os.environ["AUTOREVIEW_FAKE_GROK_RECORD"]).write_text(json.dumps(record), encoding="utf-8")
+print(json.dumps({"type": "system", "subtype": "init", "tools": [], "skills": init_skills, "mcp_servers": []}), flush=True)
+report = {
+    "findings": [],
+    "overall_correctness": "patch is correct",
+    "overall_explanation": "fake grok clean",
+    "overall_confidence": 0.99,
+    "review_completion": "complete",
+}
+print(json.dumps({
+    "type": "result", "subtype": "success", "is_error": False,
+    "result": json.dumps(report),
+    "usage": {"server_tool_use": {"web_search_requests": 0}},
+}), flush=True)
+'''
+
+
 def load_helper() -> dict[str, object]:
     return runpy.run_path(str(SCRIPT), run_name="autoreview_under_test")
 
@@ -1312,7 +1400,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
     def test_powershell_harness_exposes_runnable_engines_only(self) -> None:
         harness = SCRIPT.with_name("test-review-harness.ps1").read_text(encoding="utf-8")
 
-        self.assertIn("[ValidateSet('codex', 'claude', 'amp', 'pi', 'kimi')]", harness)
+        self.assertIn("[ValidateSet('codex', 'claude', 'amp', 'pi', 'kimi', 'grok')]", harness)
 
     def test_local_bundle_omits_sensitive_untracked_file_without_blocking(self) -> None:
         for rel in (".env", "tokens/session.dat", "secrets/local.py"):
@@ -1750,7 +1838,7 @@ class AutoreviewHardeningTests(unittest.TestCase):
                 ("branch", base, {e2e}, 2),
                 ("local", base, {source, e2e}, 1),
             )
-            for engine in ("codex", "claude", "amp", "pi", "kimi"):
+            for engine in ("codex", "claude", "amp", "pi", "kimi", "grok"):
                 for mode, ref, accepted, expected_exit in cases:
                     with self.subTest(engine=engine, mode=mode, ref=bool(ref)):
                         sends = []
@@ -3816,6 +3904,81 @@ class AutoreviewHardeningTests(unittest.TestCase):
         self.assertEqual(env["KIMI_MODEL_NAME"], "kimi-model")
         self.assertNotIn("KIMI_CODE_HOME", env)
         self.assertNotIn("PYTHONPATH", env)
+
+    def test_grok_fake_binary_runs_in_isolated_subscription_runtime(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="autoreview-grok-fake.") as tempdir:
+            root = Path(tempdir)
+            repo = init_repo(root)
+            source_home = root / "source-grok"
+            source_home.mkdir()
+            (source_home / "auth.json").write_bytes(b"fixture-auth")
+            fake_bin = write_executable(root / "grok", fake_grok_script())
+            record = root / "grok-record.json"
+            version_record = root / "grok-version-record.jsonl"
+            args = argparse.Namespace(
+                grok_bin=str(fake_bin), model="grok-4.7", thinking="high",
+                stream_engine_output=False, engine_timeout_seconds=10,
+            )
+            inherited = {
+                "GROK_HOME": str(source_home),
+                "AUTOREVIEW_FAKE_GROK_RECORD": str(record),
+                "AUTOREVIEW_FAKE_GROK_VERSION_RECORD": str(version_record),
+                "XAI_API_KEY": "must-not-pass",
+                "GROK_DEPLOYMENT_KEY": "must-not-pass",
+                "GROK_CONFIG": str(repo / "hostile.toml"),
+                "AWS_CONFIG_FILE": str(repo / "aws"),
+                "GOOGLE_APPLICATION_CREDENTIALS": str(repo / "google.json"),
+            }
+            with mock.patch.dict(os.environ, inherited, clear=False), mock.patch.dict(
+                self.helper["run_grok"].__globals__,
+                {
+                    "GROK_SYSTEM_CONFIG_ROOT": root / "no-system-config",
+                    "grok_macos_managed_config_present": lambda: False,
+                },
+            ):
+                output = self.helper["run_grok"](args, repo, "review prompt")
+
+            self.assertEqual(json.loads(output)["review_completion"], "complete")
+            observed = json.loads(record.read_text(encoding="utf-8"))
+            self.assertEqual(
+                observed["prompt"],
+                "review prompt\n\n"
+                "You have no tools and this is your only turn: everything you need is in this prompt. "
+                "Reply with the JSON object only: no preamble, no commentary, no code fence.",
+            )
+            self.assertIn("--no-auto-update", observed["argv"])
+            self.assertEqual(observed["home_entries"], ["auth.json", "bundled", "config.toml"])
+            self.assertEqual(observed["auth_mode"], 0o600)
+            self.assertNotEqual(Path(observed["cwd"]), repo)
+            self.assertIn('disabled = ["bundled-alpha", "bundled-beta"]', observed["config"])
+            config = tomllib.loads(observed["config"])
+            runtime_home = Path(observed["env"]["GROK_HOME"])
+            self.assertEqual(config["skills"]["ignore"], [
+                str(runtime_home / "bundled"),
+                str(runtime_home / "skills"),
+                observed["env"]["HOME"],
+                observed["cwd"],
+            ])
+            self.assertEqual(observed["env"]["GROK_SUBAGENTS"], "0")
+            self.assertEqual(observed["env"]["GROK_MEMORY"], "0")
+            self.assertEqual(observed["env"]["GROK_BACKEND_SEARCH"], "0")
+            self.assertEqual(observed["env"]["GROK_MANAGED_MCPS_ENABLED"], "0")
+            version_probes = [
+                json.loads(line)
+                for line in version_record.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(version_probes), 2)
+            self.assertNotEqual(version_probes[0]["GROK_HOME"], version_probes[1]["GROK_HOME"])
+            for probe in version_probes:
+                self.assertTrue(probe["isolated"])
+                self.assertNotEqual(Path(probe["GROK_HOME"]), source_home)
+                self.assertNotEqual(Path(probe["HOME"]), source_home)
+                self.assertEqual(probe["HOME"], probe["USERPROFILE"])
+            for key in (
+                "XAI_API_KEY", "GROK_DEPLOYMENT_KEY", "GROK_CONFIG",
+                "AWS_CONFIG_FILE", "GOOGLE_APPLICATION_CREDENTIALS",
+            ):
+                self.assertIsNone(observed["env"][key])
 
     def test_safe_git_env_preserves_trusted_platform_and_helper_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -6925,12 +7088,17 @@ class AuthenticatedProxyTests(unittest.TestCase):
                         # Windows os.environ canonicalizes names to uppercase;
                         # POSIX must retain each supplied casing independently.
                         lookup_key = key.upper() if os.name == "nt" else key
-                        self.assertEqual(env.get(lookup_key), value, key)
+                        if engine == "grok" and key in {"CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE"}:
+                            self.assertNotIn(lookup_key, env)
+                        else:
+                            self.assertEqual(env.get(lookup_key), value, key)
                     self.assertNotIn("UNRELATED_SECRET", env)
                     self.assertNotIn("NODE_OPTIONS", env)
                     if engine == "codex":
                         self.assertEqual(env["OPENAI_API_KEY"], "provider-auth-fixture")
                     elif engine in {"claude", "amp"}:
+                        self.assertNotIn("OPENAI_API_KEY", env)
+                    elif engine == "grok":
                         self.assertNotIn("OPENAI_API_KEY", env)
 
     def test_repository_ca_paths_are_not_inherited(self):

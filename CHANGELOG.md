@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add a subscription-only Grok Build 1.0.41 Autoreview engine with isolated login copying, a tool-free runtime configuration, and streaming inventory enforcement.
 - Default Autoreview to GPT-6 Sol with high reasoning and an account-access-only GPT-6 Luna retry; preserve explicit model choices and reject unsupported GPT-6 Sol/Luna minimal effort instead of selecting an older model.
 - Prefer OpenAI/Codex before Claude when choosing an Autoreview engine, including independent second opinions; retain explicit user choices and require a concrete Codex availability failure before switching.
 

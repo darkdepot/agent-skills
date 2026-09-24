@@ -9,6 +9,7 @@ import bisect
 import contextlib
 import copy
 import functools
+import getpass
 import hashlib
 import io
 import json
@@ -33,8 +34,13 @@ from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, NamedTuple
 
+try:
+    import pwd as pwd_module
+except ImportError:  # Windows has no pwd module.
+    pwd_module = None  # type: ignore[assignment]
 
-ENGINES = ("codex", "claude", "amp", "pi", "kimi")
+
+ENGINES = ("codex", "claude", "amp", "pi", "kimi", "grok")
 ENGINE_GIT_CONFIG_OVERRIDES = (
     ("core.fsmonitor", "false"),
     ("core.pager", "cat"),
@@ -389,12 +395,14 @@ DEFAULT_MODEL_BY_ENGINE = {
     "amp": "openai/gpt-5.6-sol",
     "codex": "gpt-6-sol",
     "claude": "claude-fable-5",
+    "grok": "grok-4.7",
 }
 DEFAULT_CODEX_ACCESS_FALLBACK_MODEL = "gpt-6-luna"
 AMP_THINKING_VALUES = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
 DEFAULT_THINKING_BY_ENGINE = {
     "amp": "high",
     "codex": "high",
+    "grok": "low",
 }
 THINKING_LEVELS_BY_ENGINE = {
     "amp": set(AMP_THINKING_VALUES),
@@ -402,6 +410,7 @@ THINKING_LEVELS_BY_ENGINE = {
     "claude": {"low", "medium", "high", "xhigh", "max"},
     "pi": {"off", "minimal", "low", "medium", "high", "xhigh"},
     "kimi": {"off", "on"},
+    "grok": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
 }
 CLAUDE_SAFE_MODE_MIN_VERSION = (2, 1, 169)
 CLAUDE_FABLE_MIN_VERSION = (2, 1, 170)
@@ -416,6 +425,123 @@ PI_TRUST_ISOLATION_MIN_VERSION = (0, 79, 0)
 # contract with --quiet/--work-dir/--config-file/--mcp-config-file flags; no
 # such CLI was ever released — the real contract is the 0.30+ one.)
 KIMI_ISOLATION_MIN_VERSION = (0, 30, 0)
+GROK_VERIFIED_VERSIONS = frozenset({(1, 0, 41)})
+GROK_PROBE_TIMEOUT_SECONDS = 60
+GROK_REPORT_FORMAT_INSTRUCTION = (
+    "You have no tools and this is your only turn: everything you need is in this prompt. "
+    "Reply with the JSON object only: no preamble, no commentary, no code fence."
+)
+GROK_REQUIRED_FLAGS = (
+    "--prompt-file",
+    "--verbatim",
+    "--output-format",
+    "--model",
+    "--disallowed-tools",
+    "--max-turns",
+    "--reasoning-effort",
+    "--no-subagents",
+    "--disable-web-search",
+    "--cwd",
+)
+GROK_DENIED_TOOLS = (
+    "run_terminal_cmd",
+    "run_terminal_command",
+    "grep",
+    "read_file",
+    "search_replace",
+    "list_dir",
+    "web_search",
+    "web_fetch",
+    "todo_write",
+    "task",
+    "spawn_subagent",
+    "kill_command_or_subagent",
+    "get_command_or_subagent_output",
+    "scheduler_create",
+    "scheduler_delete",
+    "scheduler_list",
+    "monitor",
+    "workflow",
+    "update_goal",
+    "search_tool",
+    "use_tool",
+    "Agent",
+    "enter_plan_mode",
+    "exit_plan_mode",
+    "ask_user_question",
+    "send_feedback",
+    "image_gen",
+    "image_edit",
+    "image_to_video",
+    "reference_to_video",
+    "write",
+    "write_file",
+    "x_user_search",
+    "x_semantic_search",
+    "x_keyword_search",
+    "x_thread_fetch",
+)
+GROK_SYSTEM_CONFIG_ROOT = Path("/etc/grok")
+GROK_MACOS_MANAGED_PREFERENCE_ROOT = Path("/Library/Managed Preferences")
+
+
+def grok_local_usernames() -> tuple[str, ...]:
+    usernames: list[str] = []
+    if pwd_module is not None:
+        try:
+            effective_username = pwd_module.getpwuid(os.geteuid()).pw_name
+        except KeyError:
+            effective_username = ""
+        if isinstance(effective_username, str):
+            usernames.append(effective_username.strip())
+    try:
+        login_username = getpass.getuser().strip()
+    except (KeyError, OSError):
+        login_username = ""
+    usernames.append(
+        login_username
+        or (
+            os.environ.get("USER", "").strip()
+            or os.environ.get("LOGNAME", "").strip()
+            or "unknown-user"
+        )
+    )
+    return tuple(dict.fromkeys(
+        username
+        for username in usernames
+        if username and username not in {".", ".."} and Path(username).name == username
+    ))
+
+
+GROK_MACOS_MANAGED_PREFERENCE_PATHS = (
+    GROK_MACOS_MANAGED_PREFERENCE_ROOT / "ai.x.grok.plist",
+)
+GROK_TRUST_PATH_ENV_KEYS = {"NODE_EXTRA_CA_CERTS", "SSL_CERT_DIR", "SSL_CERT_FILE"}
+GROK_RUNTIME_ENV = {
+    "GROK_SUBAGENTS": "0",
+    "GROK_MEMORY": "0",
+    "GROK_WEB_FETCH": "0",
+    "GROK_WORKFLOWS": "0",
+    "GROK_WRITE_FILE": "0",
+    "GROK_ASK_USER_QUESTION": "0",
+    "GROK_CAMPAIGNS": "0",
+    "GROK_BACKEND_SEARCH": "0",
+    "GROK_MANAGED_MCPS_ENABLED": "0",
+    "GROK_TELEMETRY_ENABLED": "0",
+    "GROK_FEEDBACK_ENABLED": "0",
+    "GROK_CLAUDE_MCPS_ENABLED": "0",
+    "GROK_CLAUDE_RULES_ENABLED": "0",
+    "GROK_CLAUDE_SKILLS_ENABLED": "0",
+    "GROK_CLAUDE_AGENTS_ENABLED": "0",
+    "GROK_CLAUDE_HOOKS_ENABLED": "0",
+    "GROK_CURSOR_MCPS_ENABLED": "0",
+    "GROK_CURSOR_RULES_ENABLED": "0",
+    "GROK_CURSOR_SKILLS_ENABLED": "0",
+    "GROK_CURSOR_AGENTS_ENABLED": "0",
+    "GROK_CURSOR_HOOKS_ENABLED": "0",
+    "NO_COLOR": "1",
+    "RUST_LOG": "off",
+}
 SUBPROCESS_TEXT_ENCODING = "utf-8"
 SUBPROCESS_TEXT_ERRORS = "replace"
 
@@ -513,6 +639,7 @@ def run(
     env: dict[str, str] | None = None,
     text_errors: str = SUBPROCESS_TEXT_ERRORS,
     capture_dir: Path | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     with contextlib.ExitStack() as stack:
         captures = [
@@ -533,6 +660,7 @@ def run(
             stdout=captures[0] if captures else subprocess.PIPE,
             stderr=captures[1] if captures else subprocess.PIPE,
             env=env,
+            timeout=timeout,
         )
         if captures:
             for capture in captures:
@@ -1148,6 +1276,8 @@ def safe_engine_env(
         if value and external_env_path(repo, value):
             env[key] = value
     for key in TRANSPORT_TRUST_PATH_ENV_KEYS:
+        if engine == "grok" and key not in GROK_TRUST_PATH_ENV_KEYS:
+            continue
         value = os.environ.get(key)
         normalized = normalize_external_env_path_value(repo, key, value) if value else None
         if normalized:
@@ -1456,6 +1586,21 @@ class TimedOutEngineProcess(subprocess.CompletedProcess[str]):
     """Distinguish our deadline from a reviewer that itself exits 124."""
 
 
+class RuntimeGuardEngineProcess(subprocess.CompletedProcess[str]):
+    """A streamed engine process terminated by an incremental runtime guard."""
+
+    def __init__(
+        self,
+        args: list[str],
+        returncode: int,
+        stdout: str,
+        stderr: str,
+        guard_reason: str,
+    ) -> None:
+        super().__init__(args, returncode, stdout, stderr)
+        self.guard_reason = guard_reason
+
+
 class EngineRuntimeDeadline:
     """One absolute wall-clock deadline for an owned reviewer process."""
 
@@ -1524,10 +1669,11 @@ def run_with_heartbeat(
     max_runtime_seconds: float | None = None,
     stream_output: bool = False,
     stream_display: Callable[[str, str], str | None] | None = None,
+    stream_guard: Callable[[str, str], str | None] | None = None,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     deadline = EngineRuntimeDeadline(label, max_runtime_seconds)
-    if stream_output:
+    if stream_output or stream_guard is not None:
         return run_with_stream(
             args,
             cwd,
@@ -1536,6 +1682,7 @@ def run_with_heartbeat(
             heartbeat_seconds=heartbeat_seconds,
             deadline=deadline,
             stream_display=stream_display,
+            stream_guard=stream_guard,
             env=env,
         )
     started = time.monotonic()
@@ -1595,6 +1742,7 @@ def run_with_stream(
     heartbeat_seconds: float,
     deadline: EngineRuntimeDeadline | None = None,
     stream_display: Callable[[str, str], str | None] | None,
+    stream_guard: Callable[[str, str], str | None] | None = None,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     deadline = deadline or EngineRuntimeDeadline(label, None)
@@ -1622,6 +1770,7 @@ def run_with_stream(
             heartbeat_seconds=heartbeat_seconds,
             deadline=deadline,
             stream_display=stream_display,
+            stream_guard=stream_guard,
         )
     finally:
         if not deadline.terminated:
@@ -1638,11 +1787,13 @@ def collect_streamed_process(
     heartbeat_seconds: float,
     deadline: EngineRuntimeDeadline,
     stream_display: Callable[[str, str], str | None] | None,
+    stream_guard: Callable[[str, str], str | None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     started = time.monotonic()
     events: queue.Queue[tuple[str, str | None]] = queue.Queue()
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
+    guard_reason: str | None = None
 
     def read_stream(name: str, stream: Any) -> None:
         try:
@@ -1690,6 +1841,10 @@ def collect_streamed_process(
             stdout_parts.append(line)
         else:
             stderr_parts.append(line)
+        if stream_guard is not None and guard_reason is None:
+            guard_reason = stream_guard(name, line)
+            if guard_reason is not None:
+                terminate_process_group(proc)
         display = stream_display(name, line) if stream_display else line
         if display:
             target = sys.stdout if name == "stdout" else sys.stderr
@@ -1700,9 +1855,11 @@ def collect_streamed_process(
         for thread in threads:
             thread.join()
         stdin_thread.join(timeout=1)
-    returncode = int(proc.poll() or 0) if deadline.terminated else proc.wait()
+    returncode = int(proc.poll() or 0) if (deadline.terminated or guard_reason) else proc.wait()
     stdout = "".join(stdout_parts)
     stderr = "".join(stderr_parts)
+    if guard_reason is not None:
+        return RuntimeGuardEngineProcess(args, returncode, stdout, stderr, guard_reason)
     if deadline.terminated:
         return deadline.completed_process(args, stdout, stderr)
     return subprocess.CompletedProcess(args, returncode, stdout, stderr)
@@ -4735,6 +4892,104 @@ def ensure_kimi_isolation_supported(args: argparse.Namespace, repo: Path) -> str
     return kimi_bin
 
 
+def run_grok_probe(
+    grok_bin: str,
+    probe_args: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    *,
+    probe_name: str,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return run(
+            [grok_bin, *probe_args],
+            cwd,
+            check=False,
+            env=env,
+            timeout=GROK_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        timeout = f"{GROK_PROBE_TIMEOUT_SECONDS:g}"
+        raise SystemExit(
+            f"Grok Build {probe_name} probe timed out after {timeout}s"
+        ) from None
+
+
+def ensure_verified_grok_version(
+    grok_bin: str,
+    cwd: Path,
+    env: dict[str, str],
+) -> tuple[int, int, int]:
+    version_result = run_grok_probe(
+        grok_bin, ["--version"], cwd, env, probe_name="--version",
+    )
+    version_text = f"{version_result.stdout}\n{version_result.stderr}"
+    token_match = re.search(r"\bgrok\s+(\S+)", version_text, re.IGNORECASE)
+    if version_result.returncode != 0 or token_match is None:
+        raise SystemExit("grok engine requires a verifiable Grok Build CLI; could not parse `grok --version`")
+    version_token = token_match.group(1)
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version_token)
+    if match is None:
+        raise SystemExit(
+            f"unverified Grok Build version {version_token}; run the inventory "
+            "verification from SKILL.md and extend GROK_VERIFIED_VERSIONS"
+        )
+    version = tuple(int(part) for part in match.groups())
+    assert len(version) == 3
+    if version not in GROK_VERIFIED_VERSIONS:
+        raise SystemExit(
+            f"unverified Grok Build version {format_version(version)}; run the inventory "
+            "verification from SKILL.md and extend GROK_VERIFIED_VERSIONS"
+        )
+    return version
+
+
+def ensure_grok_isolation_supported(args: argparse.Namespace, repo: Path) -> str:
+    grok_bin = resolve_command(args.grok_bin, repo)
+    with tempfile.TemporaryDirectory(
+        prefix="autoreview-grok-probe.",
+        dir=safe_temp_root(repo),
+    ) as tempdir:
+        probe_root = Path(tempdir)
+        probe_home = probe_root / "GROK_HOME"
+        probe_user_home = probe_root / "home"
+        probe_home.mkdir()
+        probe_user_home.mkdir()
+        (probe_home / "config.toml").write_text(
+            dump_toml(grok_review_config(
+                [],
+                grok_skill_ignore_paths(probe_home, probe_user_home, probe_root),
+            )),
+            encoding="utf-8",
+        )
+        engine_env = safe_engine_env(
+            repo,
+            [Path(grok_bin).parent],
+            engine="grok",
+            extra=grok_runtime_env(probe_home, probe_user_home),
+        )
+        ensure_verified_grok_version(grok_bin, probe_root, engine_env)
+        help_result = run_grok_probe(
+            grok_bin, ["--help"], probe_root, engine_env, probe_name="--help",
+        )
+    help_text = f"{help_result.stdout}\n{help_result.stderr}"
+    missing = [
+        flag
+        for flag in GROK_REQUIRED_FLAGS
+        if re.search(
+            rf"(?<![A-Za-z0-9_-]){re.escape(flag)}(?=$|[\s,=<\[])",
+            help_text,
+        ) is None
+    ]
+    if help_result.returncode != 0 or missing:
+        detail = ", ".join(missing) if missing else "--help failed"
+        raise SystemExit(
+            "grok engine requires Grok Build isolation flags missing from --help: " + detail
+        )
+    args.grok_no_auto_update = "--no-auto-update" in help_text
+    return grok_bin
+
+
 def kimi_source_share(repo: Path) -> Path | None:
     raw = os.environ.get("KIMI_CODE_HOME", "").strip()
     candidate = Path(raw).expanduser() if raw else Path.home() / ".kimi-code"
@@ -4920,6 +5175,238 @@ def write_kimi_review_files(
         encoding="utf-8",
     )
     return config_path, agent_path
+
+
+def grok_source_home() -> Path:
+    raw = os.environ.get("GROK_HOME", "").strip()
+    candidate = Path(raw).expanduser() if raw else Path.home() / ".grok"
+    try:
+        return candidate.resolve()
+    except OSError as exc:
+        raise SystemExit("unable to resolve the Grok Build login directory") from exc
+
+
+def grok_macos_managed_config_present() -> bool:
+    if sys.platform != "darwin":
+        return False
+    user_paths = tuple(
+        GROK_MACOS_MANAGED_PREFERENCE_ROOT / username / "ai.x.grok.plist"
+        for username in grok_local_usernames()
+    )
+    return any(
+        os.path.lexists(path)
+        for path in (*GROK_MACOS_MANAGED_PREFERENCE_PATHS, *user_paths)
+    )
+
+
+def validate_grok_managed_layers(source_home: Path) -> None:
+    candidates = (
+        GROK_SYSTEM_CONFIG_ROOT / "managed_config.toml",
+        GROK_SYSTEM_CONFIG_ROOT / "requirements.toml",
+        source_home / "managed_config.toml",
+        source_home / "requirements.toml",
+    )
+    if any(os.path.lexists(path) for path in candidates) or grok_macos_managed_config_present():
+        raise SystemExit(
+            "managed Grok Build configuration detected; isolated review is unsupported on this machine"
+        )
+
+
+def validate_grok_runtime_auth_source(
+    repo: Path,
+    workspace: Path | None = None,
+    source_home: Path | None = None,
+) -> Path:
+    source_home = source_home or grok_source_home()
+    source_auth = source_home / "auth.json"
+    try:
+        resolved_auth = source_auth.resolve(strict=True)
+        source_stat = resolved_auth.stat()
+    except OSError:
+        raise SystemExit(
+            "grok engine requires a Grok Build subscription login: run `grok login`"
+        ) from None
+    if not stat.S_ISREG(source_stat.st_mode):
+        raise SystemExit("Grok Build auth.json must resolve to a regular file")
+    repo_root = repo.resolve()
+    if is_within(resolved_auth, repo_root):
+        raise SystemExit(
+            "Grok Build auth.json must resolve outside the reviewed repository"
+        )
+    if workspace is not None and is_within(resolved_auth, workspace.resolve()):
+        raise SystemExit(
+            "Grok Build auth.json must resolve outside temporary review directories"
+        )
+    return resolved_auth
+
+
+def prepare_grok_runtime_auth(
+    repo: Path,
+    workspace: Path,
+    runtime_home: Path,
+    source_home: Path | None = None,
+) -> None:
+    source_auth = validate_grok_runtime_auth_source(repo, workspace, source_home)
+    try:
+        target = runtime_home / "auth.json"
+        shutil.copyfile(source_auth, target)
+        target.chmod(0o600)
+    except OSError as exc:
+        raise SystemExit("unable to stage the Grok Build subscription login") from exc
+
+
+def grok_skill_ignore_paths(
+    runtime_home: Path,
+    runtime_user_home: Path,
+    workspace: Path,
+) -> list[str]:
+    return [
+        str((runtime_home / "bundled").absolute()),
+        str((runtime_home / "skills").absolute()),
+        str(runtime_user_home.absolute()),
+        str(workspace.absolute()),
+    ]
+
+
+def grok_review_config(
+    disabled_skills: list[str],
+    ignored_skill_paths: list[str],
+) -> dict[str, Any]:
+    return {
+        "cli": {"auto_update": False},
+        "features": {
+            "telemetry": False,
+            "feedback": False,
+            "backend_tools": False,
+            "write_file": False,
+            "ask_user_question": False,
+            "image_gen": False,
+            "video_gen": False,
+            "campaigns": False,
+            "managed_config": False,
+            "non_git_warning": False,
+            "codebase_indexing": False,
+        },
+        "goal": {"enabled": False},
+        "workflows": {"enabled": False},
+        "subagents": {"enabled": False},
+        "memory": {"enabled": False},
+        "managed_mcps": {"enabled": False},
+        "compat": {
+            "claude": {
+                "mcps": False,
+                "rules": False,
+                "skills": False,
+                "agents": False,
+                "hooks": False,
+                "sessions": False,
+            },
+            "cursor": {
+                "mcps": False,
+                "rules": False,
+                "skills": False,
+                "agents": False,
+                "hooks": False,
+                "sessions": False,
+            },
+            "codex": {
+                "hooks": False,
+                "skills": False,
+                "sessions": False,
+            },
+        },
+        "skills": {
+            "disabled": disabled_skills,
+            "ignore": ignored_skill_paths,
+        },
+    }
+
+
+def grok_runtime_env(runtime_home: Path, runtime_user_home: Path) -> dict[str, str]:
+    return {
+        **GROK_RUNTIME_ENV,
+        "GROK_HOME": str(runtime_home),
+        "HOME": str(runtime_user_home),
+        "USERPROFILE": str(runtime_user_home),
+    }
+
+
+def clear_directory(directory: Path, *, keep: set[str] | None = None) -> None:
+    keep = keep or set()
+    for path in sorted(directory.iterdir()):
+        if path.name in keep:
+            continue
+        if path.is_symlink() or not path.is_dir():
+            path.unlink()
+        else:
+            shutil.rmtree(path)
+    unexpected = sorted(path.name for path in directory.iterdir() if path.name not in keep)
+    if unexpected:
+        raise SystemExit(
+            "isolated Grok runtime could not be cleared: " + ", ".join(unexpected)
+        )
+
+
+def write_grok_review_files(
+    grok_bin: str,
+    repo: Path,
+    workspace: Path,
+    runtime_home: Path,
+    runtime_user_home: Path,
+) -> None:
+    runtime_user_home.mkdir(parents=True, exist_ok=True)
+    ignored_skill_paths = grok_skill_ignore_paths(
+        runtime_home,
+        runtime_user_home,
+        workspace,
+    )
+    config_path = runtime_home / "config.toml"
+    config_path.write_text(
+        dump_toml(grok_review_config([], ignored_skill_paths)),
+        encoding="utf-8",
+    )
+    engine_env = safe_engine_env(
+        repo,
+        [Path(grok_bin).parent],
+        engine="grok",
+        extra=grok_runtime_env(runtime_home, runtime_user_home),
+    )
+    result = run_grok_probe(
+        grok_bin,
+        ["inspect", "--json"],
+        workspace,
+        engine_env,
+        probe_name="inspect",
+    )
+    if result.returncode != 0:
+        raise SystemExit("grok inspect --json failed during isolated review preparation")
+    try:
+        inspected = json.loads(result.stdout)
+    except (json.JSONDecodeError, RecursionError):
+        raise SystemExit("grok inspect --json returned invalid JSON") from None
+    if not isinstance(inspected, dict) or not isinstance(inspected.get("skills"), list):
+        raise SystemExit("grok inspect --json did not return a skills inventory")
+    skill_names: list[str] = []
+    for skill in inspected["skills"]:
+        if not isinstance(skill, dict) or not isinstance(skill.get("name"), str) or not skill["name"].strip():
+            raise SystemExit("grok inspect --json returned an invalid skills inventory")
+        skill_names.append(skill["name"])
+
+    try:
+        auth_path = runtime_home / "auth.json"
+        auth_stat = auth_path.lstat()
+        if stat.S_ISLNK(auth_stat.st_mode) or not stat.S_ISREG(auth_stat.st_mode):
+            raise SystemExit("grok inspect replaced the isolated auth.json unexpectedly")
+        clear_directory(runtime_home, keep={"auth.json"})
+        clear_directory(runtime_user_home)
+        clear_directory(workspace)
+        auth_path.chmod(0o600)
+        config_path.write_text(
+            dump_toml(grok_review_config(skill_names, ignored_skill_paths)),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise SystemExit("unable to finalize the isolated Grok Build runtime") from exc
 
 
 def format_version(version: tuple[int, int, int]) -> str:
@@ -5950,6 +6437,362 @@ def run_kimi(args: argparse.Namespace, repo: Path, prompt: str) -> str:
     return "\n".join(texts)
 
 
+class GrokEventNestingExceeded(Exception):
+    """A Grok stream value exceeded the bounded traversal depth."""
+
+
+GROK_MAX_EVENT_NESTING = 64
+
+
+def grok_event_contains_tool_use(value: Any, depth: int = 0) -> bool:
+    if depth > GROK_MAX_EVENT_NESTING:
+        raise GrokEventNestingExceeded
+    if isinstance(value, dict):
+        kind = value.get("type")
+        if isinstance(kind, str) and kind in {"tool_use", "server_tool_use"}:
+            return True
+        return any(grok_event_contains_tool_use(item, depth + 1) for item in value.values())
+    if isinstance(value, list):
+        return any(grok_event_contains_tool_use(item, depth + 1) for item in value)
+    return False
+
+
+def grok_result_is_engine_failure(event: dict[str, Any]) -> bool:
+    return event.get("subtype") != "success" or event.get("is_error") is not False
+
+
+def grok_event_guard_violation(event: dict[str, Any], init_validated: bool) -> str | None:
+    event_type = event.get("type")
+    is_init = event_type == "system" and event.get("subtype") == "init"
+    if is_init:
+        if init_validated:
+            return "Grok Build emitted a second system/init event"
+        if event.get("tools") != []:
+            return "Grok Build exposed a non-empty tool inventory"
+        if event.get("skills") != []:
+            return "Grok Build exposed a non-empty skill inventory"
+        if event.get("mcp_servers") not in ([], {}):
+            return "Grok Build exposed MCP servers"
+        return None
+    if not init_validated:
+        return "Grok Build stream did not begin with system/init"
+    if event_type == "assistant" and grok_event_contains_tool_use(event):
+        return "Grok Build attempted a tool or server-tool call"
+    if event_type == "user":
+        return "Grok Build emitted a tool-result user event"
+    if event_type == "result":
+        usage = event.get("usage")
+        server_usage = usage.get("server_tool_use") if isinstance(usage, dict) else None
+        if isinstance(server_usage, dict) and "web_search_requests" in server_usage:
+            web_search_requests = server_usage["web_search_requests"]
+            if type(web_search_requests) is not int or web_search_requests != 0:
+                return "Grok Build terminal result failed the runtime isolation guard"
+        if grok_result_is_engine_failure(event):
+            return None
+    return None
+
+
+GROK_ERROR_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)((?<![A-Za-z0-9_])[_-]*(?:[A-Za-z0-9]+[_-]+)*"
+    r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret|token)"
+    r"\b[\"']?\s*[:=]\s*[\"']?)(?:(?:Bearer|Basic|Token)\s+)?"
+    r"(?:\[REDACTED\]|[^\s,\"'\]\}]+)"
+)
+GROK_ERROR_BEARER_PATTERN = re.compile(
+    r"(?i)(\b(?:Bearer|Basic|Token)\s+)[^\s,\"'\]\}]+"
+)
+
+
+def redact_grok_error_text(text: str) -> str:
+    redacted = GROK_ERROR_BEARER_PATTERN.sub(r"\1[REDACTED]", text)
+    redacted = GROK_ERROR_SECRET_ASSIGNMENT_PATTERN.sub(r"\1[REDACTED]", redacted)
+    return display_escape(redacted, 1000, multiline=True)
+
+
+def grok_error_texts(value: Any, depth: int = 0) -> list[str]:
+    if depth > GROK_MAX_EVENT_NESTING:
+        raise GrokEventNestingExceeded
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [text for item in value for text in grok_error_texts(item, depth + 1)]
+    if isinstance(value, dict):
+        return [
+            text
+            for key in ("message", "text", "error", "detail")
+            if key in value
+            for text in grok_error_texts(value[key], depth + 1)
+        ]
+    return []
+
+
+def grok_engine_failure_message(event: dict[str, Any]) -> str:
+    subtype = event.get("subtype")
+    subtype_text = redact_grok_error_text(subtype if isinstance(subtype, str) else "unknown")
+    details: list[str] = []
+    for key in ("errors", "error", "message", "result"):
+        details.extend(grok_error_texts(event.get(key)))
+    rendered = [redact_grok_error_text(detail) for detail in details[:4]]
+    suffix = ": " + "; ".join(rendered) if rendered else ""
+    return f"grok engine failed ({subtype_text}){suffix}"
+
+
+def grok_assistant_text_blocks(event: dict[str, Any]) -> list[str]:
+    message = event.get("message")
+    content = message.get("content") if isinstance(message, dict) else event.get("content")
+    if not isinstance(content, list):
+        return []
+    return [
+        block["text"]
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    ]
+
+
+GROK_REQUIRED_REPORT_KEYS = frozenset(SCHEMA["required"])
+
+
+def grok_report_json_candidate(text: str) -> str | None:
+    try:
+        whole_candidate = parse_json_candidate(text)
+    except RecursionError:
+        whole_candidate = None
+    if isinstance(whole_candidate, dict) and "findings" in whole_candidate:
+        return text
+    decoder = json.JSONDecoder()
+    findings_candidate: str | None = None
+    for candidate_start in reversed([
+        index for index, char in enumerate(text) if char == "{"
+    ]):
+        try:
+            parsed, candidate_length = decoder.raw_decode(text[candidate_start:])
+        except (json.JSONDecodeError, RecursionError):
+            continue
+        if isinstance(parsed, dict) and "findings" in parsed:
+            candidate = text[candidate_start:candidate_start + candidate_length]
+            if GROK_REQUIRED_REPORT_KEYS.issubset(parsed):
+                return candidate
+            if findings_candidate is None:
+                findings_candidate = candidate
+    return findings_candidate
+
+
+def validate_grok_stream_result(result: subprocess.CompletedProcess[str]) -> str:
+    invalid_reason: str | None = None
+    guard_reason: str | None = None
+    terminal_results: list[dict[str, Any]] = []
+    assistant_texts: list[str] = []
+    init_validated = False
+    result_seen = False
+    for raw_line in result.stdout.splitlines():
+        if not raw_line.strip():
+            continue
+        if result_seen:
+            invalid_reason = invalid_reason or "Grok Build returned output after its terminal result"
+        try:
+            event = json.loads(raw_line)
+        except (json.JSONDecodeError, RecursionError):
+            if init_validated:
+                invalid_reason = invalid_reason or "Grok Build returned a non-JSON stream line"
+            else:
+                guard_reason = guard_reason or "Grok Build emitted non-JSON before system/init"
+            continue
+        if not isinstance(event, dict):
+            if init_validated:
+                invalid_reason = invalid_reason or "Grok Build returned a non-object stream event"
+            else:
+                guard_reason = guard_reason or "Grok Build emitted a non-object before system/init"
+            continue
+        try:
+            violation = grok_event_guard_violation(event, init_validated)
+        except GrokEventNestingExceeded:
+            violation = "Grok Build stream event exceeded the maximum nesting depth"
+        guard_reason = guard_reason or violation
+        event_type = event.get("type")
+        if violation is None and event_type == "system" and event.get("subtype") == "init":
+            init_validated = True
+        if event_type == "result":
+            terminal_results.append(event)
+            result_seen = True
+        elif event_type == "system":
+            if event.get("subtype") != "init":
+                invalid_reason = invalid_reason or "Grok Build returned an unexpected system event"
+        elif event_type == "assistant":
+            if init_validated:
+                assistant_texts.extend(grok_assistant_text_blocks(event))
+        elif event_type != "user":
+            invalid_reason = invalid_reason or "Grok Build returned an unknown stream event"
+    if guard_reason is not None:
+        raise ReviewerUnavailable(
+            guard_reason,
+            reason="runtime_validation_failed",
+            result=result,
+        )
+    failed_result = next(
+        (
+            event
+            for event in terminal_results
+            if grok_result_is_engine_failure(event)
+        ),
+        None,
+    )
+    if failed_result is not None:
+        try:
+            message = grok_engine_failure_message(failed_result)
+        except GrokEventNestingExceeded:
+            raise ReviewerUnavailable(
+                "Grok Build error payload exceeded the maximum nesting depth",
+                reason="invalid_report",
+                result=result,
+            ) from None
+        raise ReviewerUnavailable(message, result=result)
+    if result.returncode != 0:
+        raise ReviewerUnavailable(
+            f"grok engine failed with exit code {result.returncode}",
+            result=result,
+        )
+    if invalid_reason is not None or len(terminal_results) != 1:
+        detail = invalid_reason or "Grok Build returned no single terminal result"
+        raise ReviewerUnavailable(detail, reason="invalid_report", result=result)
+    assistant_report = "".join(assistant_texts)
+    terminal_report = terminal_results[0].get("result")
+    if assistant_report.strip():
+        assistant_candidate = grok_report_json_candidate(assistant_report)
+        if assistant_candidate is not None:
+            return assistant_candidate
+    if isinstance(terminal_report, str) and terminal_report.strip():
+        terminal_candidate = grok_report_json_candidate(terminal_report)
+        if terminal_candidate is not None:
+            return terminal_candidate
+    if assistant_report.strip():
+        return assistant_report
+    if isinstance(terminal_report, str) and terminal_report.strip():
+        return terminal_report
+    raise ReviewerUnavailable(
+        "Grok Build returned an empty or non-string report",
+        reason="invalid_report",
+        result=result,
+    )
+
+
+def run_grok_with_guard(
+    args: list[str],
+    cwd: Path,
+    *,
+    label: str,
+    max_runtime_seconds: float | None,
+    stream_output: bool,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    init_validated = False
+
+    def guard(name: str, line: str) -> str | None:
+        nonlocal init_validated
+        if name != "stdout" or not line.strip():
+            return None
+        try:
+            event = json.loads(line)
+        except RecursionError:
+            return "Grok Build stream event exceeded the maximum nesting depth"
+        except json.JSONDecodeError:
+            return None if init_validated else "Grok Build emitted non-JSON before system/init"
+        if not isinstance(event, dict):
+            return None if init_validated else "Grok Build emitted a non-object before system/init"
+        try:
+            violation = grok_event_guard_violation(event, init_validated)
+        except GrokEventNestingExceeded:
+            return "Grok Build stream event exceeded the maximum nesting depth"
+        if violation is None and event.get("type") == "system" and event.get("subtype") == "init":
+            init_validated = True
+        return violation
+
+    result = run_with_heartbeat(
+        args,
+        cwd,
+        label=label,
+        max_runtime_seconds=max_runtime_seconds,
+        stream_output=stream_output,
+        stream_display=(
+            (lambda _name, line: redact_grok_error_text(line))
+            if stream_output
+            else (lambda _name, _line: None)
+        ),
+        stream_guard=guard,
+        env=env,
+    )
+    if isinstance(result, RuntimeGuardEngineProcess):
+        raise ReviewerUnavailable(
+            result.guard_reason,
+            reason="runtime_validation_failed",
+            result=result,
+        )
+    return result
+
+
+def run_grok(args: argparse.Namespace, repo: Path, prompt: str) -> str:
+    grok_bin = ensure_grok_isolation_supported(args, repo)
+    source_home = grok_source_home()
+    validate_grok_managed_layers(source_home)
+    temp_root = safe_temp_root(repo)
+    with tempfile.TemporaryDirectory(
+        prefix="autoreview-grok-workspace.",
+        dir=temp_root,
+    ) as workspace_dir, tempfile.TemporaryDirectory(
+        prefix="autoreview-grok-runtime.",
+        dir=temp_root,
+    ) as runtime_dir:
+        workspace = Path(workspace_dir)
+        runtime_root = Path(runtime_dir)
+        runtime_home = runtime_root / "GROK_HOME"
+        runtime_user_home = runtime_root / "home"
+        runtime_home.mkdir()
+        validate_grok_runtime_auth_source(repo, workspace, source_home)
+        prepare_grok_runtime_auth(
+            repo, runtime_root, runtime_home, source_home,
+        )
+        write_grok_review_files(
+            grok_bin, repo, workspace, runtime_home, runtime_user_home,
+        )
+        prompt_path = runtime_root / "prompt.txt"
+        prompt_path.write_text(
+            prompt + "\n\n" + GROK_REPORT_FORMAT_INSTRUCTION,
+            encoding="utf-8",
+        )
+        cmd = [
+            grok_bin,
+            "--prompt-file", str(prompt_path),
+            "--verbatim",
+            "--output-format", "streaming-messages-json",
+            "--model", args.model,
+            "--reasoning-effort", args.thinking,
+            "--max-turns", "1",
+            "--no-subagents",
+            "--disable-web-search",
+            "--cwd", str(workspace),
+            "--disallowed-tools", ",".join(GROK_DENIED_TOOLS),
+        ]
+        if getattr(args, "grok_no_auto_update", False):
+            cmd.append("--no-auto-update")
+        engine_env = safe_engine_env(
+            repo,
+            [Path(grok_bin).parent],
+            engine="grok",
+            extra=grok_runtime_env(runtime_home, runtime_user_home),
+        )
+        ensure_verified_grok_version(grok_bin, workspace, engine_env)
+        result = run_grok_with_guard(
+            cmd,
+            workspace,
+            label="grok",
+            max_runtime_seconds=getattr(args, "engine_timeout_seconds", None),
+            stream_output=args.stream_engine_output,
+            env=engine_env,
+        )
+    return validate_grok_stream_result(result)
+
+
 class CodexStreamDisplay:
     def __init__(self, *, activity_seconds: int = 20, suppress_diagnostics: bool = False) -> None:
         self.activity_seconds = activity_seconds
@@ -6575,9 +7418,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         action="append",
-        help="Model override or engine=model. Repeatable. Defaults: codex=gpt-6-sol with an access-only gpt-6-luna retry, claude=claude-fable-5, amp=openai/gpt-5.6-sol.",
+        help="Model override or engine=model. Repeatable. Defaults: codex=gpt-6-sol with an access-only gpt-6-luna retry, claude=claude-fable-5, amp=openai/gpt-5.6-sol, grok=grok-4.7.",
     )
-    parser.add_argument("--thinking", action="append", help="Thinking/effort override or engine=level. Repeatable. Codex: none, minimal, low, medium, high, xhigh, max; gpt-6-sol and gpt-6-luna exclude minimal; gpt-6-astra requires low through max. Claude: low, medium, high, xhigh, max. Amp: none, low, medium, high, xhigh, max. Pi: off, minimal, low, medium, high, xhigh. Kimi: off, on.")
+    parser.add_argument("--thinking", action="append", help="Thinking/effort override or engine=level. Repeatable. Codex: none, minimal, low, medium, high, xhigh, max; gpt-6-sol and gpt-6-luna exclude minimal; gpt-6-astra requires low through max. Claude: low, medium, high, xhigh, max. Amp: none, low, medium, high, xhigh, max. Pi: off, minimal, low, medium, high, xhigh. Kimi: off, on. Grok: none, minimal, low, medium, high, xhigh, max.")
     parser.add_argument(
         "--fallback-model",
         action="append",
@@ -6604,8 +7447,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--amp-bin", default=os.environ.get("AMP_BIN", "amp"))
     parser.add_argument("--pi-bin", default=os.environ.get("PI_BIN", "pi"))
     parser.add_argument("--kimi-bin", default=os.environ.get("KIMI_BIN", "kimi"))
-    parser.add_argument("--no-tools", dest="tools", action="store_false", default=True, help="Disable tools for engines that support it. Amp, Pi, and Kimi always run without tools; Codex rejects no-tools review.")
-    parser.add_argument("--no-web-search", dest="web_search", action="store_false", default=True)
+    parser.add_argument("--grok-bin", default=os.environ.get("GROK_BIN", "grok"))
+    parser.add_argument("--no-tools", dest="tools", action="store_false", default=True, help="Disable tools for engines that support it. Amp, Pi, Kimi, and Grok always run without tools; Codex rejects no-tools review.")
+    parser.add_argument("--no-web-search", dest="web_search", action="store_false", default=True, help="Disable web search where supported. Grok always disables web, X search, and backend tools.")
     parser.add_argument(
         "--claude-allowed-tools",
         default=os.environ.get(
@@ -6651,6 +7495,8 @@ def run_engine(args: argparse.Namespace, repo: Path, prompt: str) -> str:
         return run_pi(args, repo, prompt)
     if args.engine == "kimi":
         return run_kimi(args, repo, prompt)
+    if args.engine == "grok":
+        return run_grok(args, repo, prompt)
     raise SystemExit(f"unsupported engine: {args.engine}")
 
 
@@ -6759,7 +7605,9 @@ def reviewer_args(args: argparse.Namespace) -> list[argparse.Namespace]:
     clone.model = model
     clone.thinking = thinking
     clone.fallback_model = fallback_model
-    clone.tools = False if engine in {"amp", "pi", "kimi"} else args.tools
+    clone.tools = False if engine in {"amp", "pi", "kimi", "grok"} else args.tools
+    if engine == "grok":
+        clone.web_search = False
     return [clone]
 
 
@@ -6780,6 +7628,7 @@ ENGINE_ISOLATION_PROBES: dict[str, Callable[[argparse.Namespace, Path], object]]
     "amp": ensure_amp_isolation_supported,
     "pi": ensure_pi_isolation_supported,
     "kimi": ensure_kimi_isolation_supported,
+    "grok": ensure_grok_isolation_supported,
 }
 
 
@@ -6791,11 +7640,11 @@ def resolve_engine_binary(reviewer: argparse.Namespace, repo: Path) -> tuple[boo
     reported unavailable with that same reason, and the selected engine is
     checked for a resolvable CLI binary on PATH.
 
-    Once a binary resolves, codex/claude/pi/kimi are also put through the same
+    Once a binary resolves, codex/claude/pi/kimi/grok are also put through the same
     local version and required-flag probes their real runners perform
     before contacting the engine (ensure_codex_isolation_supported,
     ensure_claude_isolation_supported, ensure_pi_isolation_supported,
-    ensure_kimi_isolation_supported), so a dry run cannot report OK for a
+    ensure_kimi_isolation_supported, ensure_grok_isolation_supported), so a dry run cannot report OK for a
     configuration a real run would reject immediately (unsupported CLI
     version, missing required flag, or a launcher that fails under the
     isolated runtime). Those probes only invoke the resolved binary locally
@@ -6847,6 +7696,7 @@ def resolve_engine_binary(reviewer: argparse.Namespace, repo: Path) -> tuple[boo
         "amp": getattr(reviewer, "amp_bin", None),
         "pi": getattr(reviewer, "pi_bin", None),
         "kimi": getattr(reviewer, "kimi_bin", None),
+        "grok": getattr(reviewer, "grok_bin", None),
     }
     bin_name = bin_by_engine.get(engine)
     if bin_name is None:
@@ -6863,6 +7713,13 @@ def resolve_engine_binary(reviewer: argparse.Namespace, repo: Path) -> tuple[boo
         try:
             _, source_share = load_kimi_review_config(repo)
             validate_kimi_runtime_auth_sources(repo, source_share)
+        except SystemExit as exc:
+            return False, str(exc.code)
+    if engine == "grok":
+        try:
+            source_home = grok_source_home()
+            validate_grok_managed_layers(source_home)
+            validate_grok_runtime_auth_source(repo, source_home=source_home)
         except SystemExit as exc:
             return False, str(exc.code)
     if engine == "codex":
@@ -7237,7 +8094,7 @@ def main_impl() -> int:
         if speed:
             print(f"codex_speed: {speed}", flush=True)
     print(f"tools: {'on' if reviewer.tools else 'off'}", flush=True)
-    print(f"web_search: {'on' if args.web_search else 'off'}", flush=True)
+    print(f"web_search: {'on' if reviewer.web_search else 'off'}", flush=True)
     display_ref = args.commit if target == "commit" else target_ref
     if display_ref:
         print(f"ref: {display_ref}", flush=True)
